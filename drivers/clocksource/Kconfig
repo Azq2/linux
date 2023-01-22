@@ -721,4 +721,16 @@ config GOLDFISH_TIMER
 	help
 	  Support for the timer/counter of goldfish-rtc
 
+config PMB887X_TPU
+	bool "Clockevent for PMB887X SoCs" if !ARCH_PMB887X
+	depends on OF && ARM && (ARCH_PMB887X || COMPILE_TEST)
+	select CLKSRC_MMIO
+	select TIMER_OF
+
+config PMB887X_STM
+	bool "Clocksource for PMB887X SoCs" if !ARCH_PMB887X
+	depends on OF && ARM && (ARCH_PMB887X || COMPILE_TEST)
+	select CLKSRC_MMIO
+	select TIMER_OF
+
 endmenu

@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0
+/dts-v1/;
+#include "pmb887x.dtsi"
+
+/ {
+	model = "BenQ-Siemens EL71";
+	compatible = "siemens,el71", "infineon,pmb887x";
+	
+	chosen {
+		bootargs = "earlyprintk";
+	};
+	
+	memory@a8000000 {
+		device_type = "memory";
+		reg = <0xa8000000 0x1000000>;
+	};
+};

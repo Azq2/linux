@@ -1,0 +1,81 @@
+// SPDX-License-Identifier: GPL-2.0
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	compatible = "infineon,pmb887x";
+	interrupt-parent = <&intc>;
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			compatible = "arm,arm926ej-s";
+			device_type = "cpu";
+			reg = <0>;
+		};
+	};
+	
+	clocks {
+		fsys_clk: fsys_clk {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <26000000>;
+		};
+	};
+	
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+		interrupt-parent = <&intc>;
+		ranges;
+		
+		intc: interrupt-controller@f2800000 {
+			compatible = "pmb887x,intc";
+			#interrupt-cells = <1>;
+			interrupt-controller;
+			reg = <0xf2800000 0x1000>;
+		};
+		
+		tpu: timer@f6400000 {
+			compatible = "pmb887x,tpu";
+			reg = <0xf6400000 0x1000>;
+			interrupts = <0x77>;
+			clocks = <&ftpu_clk>;
+			clock-frequency = <1000000>;
+			
+			ftpu_clk: ftpu_clk {
+				compatible = "pmb887x,clc";
+				clocks = <&fsys_clk>;
+				#clock-cells = <0>;
+			};
+		};
+		
+		stm: timer@f4b00000 {
+			compatible = "pmb887x,stm";
+			reg = <0xf4b00000 0x1000>;
+			clocks = <&fstm_clk>;
+			
+			fstm_clk: fstm_clk {
+				compatible = "pmb887x,clc";
+				clocks = <&fsys_clk>;
+				#clock-cells = <0>;
+			};
+		};
+		
+		dmac: dma-controller@f3000000 {
+			compatible = "arm,pl080", "arm,primecell";
+			reg = <0xf3000000 0x1000>;
+			interrupt-parent = <&intc>;
+			interrupts = <15>;
+			lli-bus-interface-ahb1;
+			lli-bus-interface-ahb2;
+			mem-bus-interface-ahb2;
+			memcpy-burst-size = <256>;
+			memcpy-bus-width = <32>;
+			#dma-cells = <2>;
+		};
+	};
+};

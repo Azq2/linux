@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+menuconfig ARCH_PMB887X
+	bool "Infineon PMB887x SoCs"
+	depends on ARCH_MULTI_V5
+	depends on CPU_LITTLE_ENDIAN
+	select GPIOLIB
+	select PINCTRL
+	select PMB887X_TPU
+	select PMB887X_STM
+
+if ARCH_PMB887X
+
+config MACH_PMB887X
+	bool "Infineon PMB887X family"
+	help
+	  Select this if you are using an Infineon PMB887X
+	  families.
+
+endif

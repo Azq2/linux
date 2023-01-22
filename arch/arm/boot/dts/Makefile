@@ -1500,6 +1500,8 @@ dtb-$(CONFIG_ARCH_ZYNQ) += \
 	zynq-zturn-v5.dtb \
 	zynq-zybo.dtb \
 	zynq-zybo-z7.dtb
+dtb-$(CONFIG_MACH_PMB887X) += \
+	siemens-el71.dtb
 dtb-$(CONFIG_MACH_ARMADA_370) += \
 	armada-370-c200-v2.dtb \
 	armada-370-db.dtb \

@@ -3,8 +3,7 @@ menuconfig ARCH_PMB887X
 	bool "Infineon PMB887x SoCs"
 	depends on ARCH_MULTI_V5
 	depends on CPU_LITTLE_ENDIAN
-	select GPIOLIB
-	select PINCTRL
+	select ARM_AMBA
 	select PMB887X_TPU
 	select PMB887X_STM
 

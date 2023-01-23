@@ -24,7 +24,7 @@ CONFIG_EMBEDDED=y
 CONFIG_ARCH_PMB887X=y
 CONFIG_MACH_PMB887X=y
 # CONFIG_ATAGS is not set
-CONFIG_CMDLINE="console=ttyS0,115200 earlyprintk ignore_loglevel"
+CONFIG_CMDLINE="console=ttyS0,115200 earlyprintk ignore_loglevel root=/dev/mmcblk0p1 rootwait"
 CONFIG_CMDLINE_FORCE=y
 # CONFIG_SUSPEND is not set
 # CONFIG_SECCOMP is not set
@@ -46,6 +46,7 @@ CONFIG_SLUB_TINY=y
 # CONFIG_TTY is not set
 # CONFIG_HW_RANDOM is not set
 # CONFIG_DEVMEM is not set
+CONFIG_GPIOLIB=y
 # CONFIG_HWMON is not set
 # CONFIG_USB_SUPPORT is not set
 CONFIG_MMC=y

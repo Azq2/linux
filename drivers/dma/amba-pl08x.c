@@ -60,6 +60,9 @@
  *    after the final transfer signalled by LBREQ or LSREQ.  The DMAC
  *    will then move to the next LLI entry. Unsupported by PL080S.
  */
+
+#define DEBUG 1
+
 #include <linux/amba/bus.h>
 #include <linux/amba/pl08x.h>
 #include <linux/debugfs.h>
@@ -2847,11 +2850,15 @@ static int pl08x_probe(struct amba_device *adev, const struct amba_id *id)
 	writel(0x000000FF, pl08x->base + PL080_TC_CLEAR);
 
 	/* Attach the interrupt handler */
-	ret = request_irq(adev->irq[0], pl08x_irq, 0, DRIVER_NAME, pl08x);
-	if (ret) {
-		dev_err(&adev->dev, "%s failed to request interrupt %d\n",
-			__func__, adev->irq[0]);
-		goto out_no_irq;
+	for (i = 0; i < AMBA_NR_IRQS; ++i) {
+		if (adev->irq[i]) {
+			ret = request_irq(adev->irq[i], pl08x_irq, 0, DRIVER_NAME, pl08x);
+			if (ret) {
+				dev_err(&adev->dev, "%s failed to request interrupt %d\n",
+					__func__, adev->irq[i]);
+				goto out_no_irq;
+			}
+		}
 	}
 
 	/* Initialize physical channels */
@@ -2965,7 +2972,10 @@ out_no_slave:
 out_no_memcpy:
 	kfree(pl08x->phy_chans);
 out_no_phychans:
-	free_irq(adev->irq[0], pl08x);
+	for (i = 0; i < AMBA_NR_IRQS; ++i) {
+		if (adev->irq[i])
+			free_irq(adev->irq[i], pl08x);
+	}
 out_no_irq:
 	dma_pool_destroy(pl08x->pool);
 out_no_lli_pool:

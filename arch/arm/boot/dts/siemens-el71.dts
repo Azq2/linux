@@ -37,11 +37,25 @@
 	};
 };
 
+/* Usart at "nano" connector */
+&usart0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&usart0_pins>;
+};
+
+/* Usart for bluetooth */
+&usart1 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&usart1_pins>;
+};
+
 &mmc {
 	status = "okay";
 	vmmc-supply = <&mmc_vcc>;
 	vqmmc-supply = <&mmc_vcc>;
-	/*cd-gpios = <&gpio 77 GPIO_ACTIVE_HIGH>;*/
+	cd-gpios = <&gpio 77 GPIO_ACTIVE_HIGH>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&mmc_pins>;
 	bus-width = <1>;

@@ -1562,6 +1562,25 @@ config SERIAL_SUNPLUS_CONSOLE
 	  you can alter that using a kernel command line option such as
 	  "console=ttySUPx".
 
+config SERIAL_PMB887X
+	tristate "PMB887X ASC serial port support"
+	select SERIAL_CORE
+	depends on ARM || COMPILE_TEST
+	help
+	  This driver is for the on-chip Asynchronous Serial Controller on
+	  PMB887X SoCs.
+
+	  If unsure, say N.
+
+config SERIAL_PMB887X_CONSOLE
+	bool "Console on PMB887X ASC"
+	depends on SERIAL_PMB887X=y
+	select SERIAL_CORE_CONSOLE
+	select SERIAL_EARLYCON
+	help
+	  Select this option if you would like to use a PMB887X ASC as the
+	  system console.
+
 endmenu
 
 config SERIAL_MCTRL_GPIO

@@ -167,11 +167,20 @@ static void pmb887x_pmx_free(struct pinctrl_dev *pctldev, struct pinctrl_gpio_ra
 	pctl->pins_alt_func[pin] = 0;
 }
 
+static const struct pmb887x_desc_mux *pmb887x_pmx_find_mux(struct pmb887x_pinctrl *pctl, int pin, const char *name) {
+	int i;
+	for (i = 0; i < PMB887X_CONFIG_NUM; i++) {
+		const struct pmb887x_desc_mux *mux = &pctl->pins[pin].functions[i];
+		if (mux->name && strcmp(mux->name, name) == 0)
+			return mux;
+	}
+	return NULL;
+}
+
 static int pmb887x_pmx_set_mux(struct pinctrl_dev *pctldev, unsigned int func_select, unsigned int group_select) {
 	struct pmb887x_pinctrl *pctl = pinctrl_dev_get_drvdata(pctldev);
 	struct function_desc *function;
 	struct group_desc *group;
-	u32 is, os, mux;
 	int i;
 	
 	group = pinctrl_generic_get_group(pctldev, group_select);
@@ -182,15 +191,18 @@ static int pmb887x_pmx_set_mux(struct pinctrl_dev *pctldev, unsigned int func_se
 	if (!function)
 		return -EINVAL;
 	
-	mux = *(unsigned int *)(function->data);
-	is = (mux >> 8) & 0xFF;
-	os = mux & 0xFF;
-	
 	for (i = 0; i < group->num_pins; i++) {
 		u32 reg;
-		pctl->pins_alt_func[group->pins[i]] = mux;
-		if (is || os) {
-			reg = (is << GPIO_IS_SHIFT) | (os << GPIO_OS_SHIFT) | GPIO_PS_ALT;
+		const struct pmb887x_desc_mux *mux = pmb887x_pmx_find_mux(pctl, group->pins[i], function->name);
+		if (!mux) {
+			dev_err(pctl->dev, "Function %s not found for pin %d! (%s)\n", function->name, group->pins[i], group->name);
+			return -ENOENT;
+		}
+		
+		pctl->pins_alt_func[group->pins[i]] = (mux->is << 8) | mux->os;
+		
+		if (mux->is || mux->os) {
+			reg = (mux->is << GPIO_IS_SHIFT) | (mux->os << GPIO_OS_SHIFT) | GPIO_PS_ALT;
 		} else {
 			reg = GPIO_PS_MANUAL | GPIO_DIR_IN | GPIO_ENAQ_ON;
 		}
@@ -358,7 +370,8 @@ static int pmb887x_build_groups(struct pmb887x_pinctrl *pctl) {
 		struct group_desc *group = &groups[i];
 		const struct pinctrl_pin_desc *pin_info = &pctl->pins[i].pin;
 		group->name = pin_info->name;
-		group->pins = (int *)&pin_info->number;
+		group->pins = (int *) &pin_info->number;
+		group->data = (void *) &pctl->pins[i].functions;
 		pinctrl_generic_add_group(pctl->pctl_dev, group->name, group->pins, 1, NULL);
 	}
 	
@@ -440,7 +453,6 @@ static int pmb887x_build_functions(struct pmb887x_pinctrl *pctl) {
 			if (!func->name) {
 				func->name = pin_mux->name;
 				func->num_group_names = 1;
-				func->data = (int *)&pin_mux->mode;
 				pctl->nfuncs++;
 			}
 		}

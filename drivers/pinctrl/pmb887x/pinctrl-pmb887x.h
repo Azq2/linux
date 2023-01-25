@@ -17,7 +17,8 @@
 
 struct pmb887x_desc_mux {
 	const char *name;
-	const u16 mode;
+	const u8 is;
+	const u8 os;
 };
 
 struct pmb887x_desc_pin {
@@ -34,9 +35,10 @@ struct pmb887x_desc_pin {
 	}
 
 #define PMB887X_FUNCTION(_is, _os, _name)			\
-	{										\
-		.mode = (((_is) << 8) | (_os)),				\
+	{												\
 		.name = _name,								\
+		.is = _is,									\
+		.os = _os,									\
 	}
 
 struct pmb887x_pinctrl_match_data {

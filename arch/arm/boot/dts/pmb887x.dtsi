@@ -64,7 +64,7 @@
 				#clock-cells = <0>;
 			};
 		};
-		/*
+		
 		dmac: dma-controller@f3000000 {
 			compatible = "arm,pl080", "arm,primecell";
 			reg = <0xf3000000 0x1000>;
@@ -74,7 +74,7 @@
 			clock-names = "apb_pclk";
 			#dma-cells = <2>;
 		};
-		*/
+		
 		gpio: gpio@f4300000 {
 			compatible = "pmb8876,pinctrl";
 			#address-cells = <1>;
@@ -87,7 +87,16 @@
 			mmc_pins: mmc-pins {
 				pins = "MMCI_DAT0", "MMCI_CLK", "MMCI_CMD";
 				function = "MMC";
-				bias-disable;
+			};
+			
+			usart0_pins: usart0-pins {
+				pins = "USART0_TXD", "USART0_RXD";
+				function = "USART0";
+			};
+			
+			usart1_pins: usart1-pins {
+				pins = "USART1_TXD", "USART1_RXD";
+				function = "USART1";
 			};
 		};
 		
@@ -106,6 +115,36 @@
 				clocks = <&fsys_clk>;
 				#clock-cells = <0>;
 				clock-frequency = <13000000>;
+			};
+		};
+		
+		usart0: serial@f1000000 {
+			compatible = "pmb887x,asc";
+			reg = <0xf1000000 0x1000>;
+			interrupt-names = "tx", "rx";
+			interrupts = <4>, <6>;
+			clocks = <&fasc0_clk>;
+			status = "disabled";
+			
+			fasc0_clk: fasc0_clk {
+				compatible = "pmb887x,clc";
+				clocks = <&fsys_clk>;
+				#clock-cells = <0>;
+			};
+		};
+		
+		usart1: serial@f1800000 {
+			compatible = "pmb887x,asc";
+			reg = <0xf1800000 0x1000>;
+			interrupt-names = "tx", "rx";
+			interrupts = <26>, <28>;
+			clocks = <&fasc1_clk>;
+			status = "disabled";
+			
+			fasc1_clk: fasc1_clk {
+				compatible = "pmb887x,clc";
+				clocks = <&fsys_clk>;
+				#clock-cells = <0>;
 			};
 		};
 	};

@@ -23,12 +23,6 @@
 			#clock-cells = <0>;
 			clock-frequency = <26000000>;
 		};
-		
-		dma_dummy_clk: dma_dummy_clk {
-			compatible = "fixed-clock";
-			#clock-cells = <0>;
-			clock-frequency = <26000000>;
-		};
 	};
 	
 	soc {
@@ -70,15 +64,49 @@
 				#clock-cells = <0>;
 			};
 		};
-		
+		/*
 		dmac: dma-controller@f3000000 {
 			compatible = "arm,pl080", "arm,primecell";
 			reg = <0xf3000000 0x1000>;
 			interrupt-parent = <&intc>;
 			interrupts = <0x23>, <0x24>, <0x25>, <0x26>, <0x27>, <0x28>, <0x29>, <0x2A>, <0x2B>;
-			clocks = <&dma_dummy_clk>;
+			clocks = <&fsys_clk>;
 			clock-names = "apb_pclk";
 			#dma-cells = <2>;
+		};
+		*/
+		gpio: gpio@f4300000 {
+			compatible = "pmb8876,pinctrl";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			reg = <0xf4300000 0x1000>;
+			pins-are-numbered;
+			gpio-controller;
+			#gpio-cells = <2>;
+			
+			mmc_pins: mmc-pins {
+				pins = "MMCI_DAT0", "MMCI_CLK", "MMCI_CMD";
+				function = "MMC";
+				bias-disable;
+			};
+		};
+		
+		mmc: mmc@f7301000 {
+			compatible = "arm,pl180", "arm,primecell";
+			reg-names = "default", "pmb887x-clc";
+			reg = <0xf7301000 0x1000>, <0xf7300000 4>;
+			interrupt-parent = <&intc>;
+			interrupts = <0x94>;
+			clocks = <&fmmc_clk>;
+			clock-names = "apb_pclk";
+			status = "disabled";
+			
+			fmmc_clk: fmmc_clk {
+				compatible = "pmb887x,clc";
+				clocks = <&fsys_clk>;
+				#clock-cells = <0>;
+				clock-frequency = <13000000>;
+			};
 		};
 	};
 };

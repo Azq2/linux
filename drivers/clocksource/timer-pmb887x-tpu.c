@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #define pr_fmt(fmt) "pmb887x-tpu: " fmt
 
-#define DEBUG 1
-
 #include <linux/kernel.h>
 #include <linux/clocksource.h>
 #include <linux/clockchips.h>

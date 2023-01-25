@@ -4,6 +4,7 @@
 
 #include <linux/amba/pl08x.h>
 #include <linux/amba/pl080.h>
+#include <linux/amba/mmci.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -14,9 +15,16 @@
 
 #define PMB887X_SCU_DMAEN	0xF4400084
 #define PMB887X_DMAC_BASE	0xF3000000
+#define PMB887X_MMCI_BASE	0xF7301000
 
 static spinlock_t pmb887x_dma_lock = __SPIN_LOCK_UNLOCKED(x);
 
+/* MMCI */
+static struct mmci_platform_data pmb887x_pl180_plat_data = {
+	.ocr_mask	= MMC_VDD_29_30,
+};
+
+/* DMA */
 static int pl08x_get_xfer_signal(const struct pl08x_channel_data *cd) {
 	unsigned int signal = cd->min_signal, val;
 	unsigned long flags;
@@ -74,7 +82,8 @@ struct pl08x_platform_data pmb887x_pl080_plat_data = {
 
 /* Add auxdata to pass platform data */
 static struct of_dev_auxdata pmb887x_auxdata[] __initdata = {
-	OF_DEV_AUXDATA("arm,pl080", PMB887X_DMAC_BASE, "pl08xdmac", &pmb887x_pl080_plat_data),
+	OF_DEV_AUXDATA("arm,pl080", PMB887X_DMAC_BASE, NULL, &pmb887x_pl080_plat_data),
+	OF_DEV_AUXDATA("arm,primecell", PMB887X_MMCI_BASE, NULL, &pmb887x_pl180_plat_data),
 	{}
 };
 

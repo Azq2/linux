@@ -2,6 +2,8 @@
 /dts-v1/;
 #include "pmb887x.dtsi"
 
+#include <dt-bindings/gpio/gpio.h>
+
 / {
 	model = "BenQ-Siemens EL71";
 	compatible = "siemens,el71", "infineon,pmb887x";
@@ -10,8 +12,37 @@
 		bootargs = "earlyprintk";
 	};
 	
+	mmc_vcc: mmc-vcc {
+		compatible = "regulator-gpio";
+		regulator-name = "mmc-vcc";
+		states = <2900000 0>;
+		regulator-min-microvolt = <2900000>;
+		regulator-max-microvolt = <2900000>;
+		enable-gpio = <&gpio 58 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+	
+	/* RAM */
 	memory@a8000000 {
 		device_type = "memory";
 		reg = <0xa8000000 0x1000000>;
 	};
+	
+	/* External watchdog */
+	watchdog: watchdog {
+		compatible = "linux,wdt-gpio-v2";
+		gpios = <&gpio 62 GPIO_ACTIVE_HIGH>;
+		wdt-min-time = <550>;
+		wdt-max-time = <2000>;
+	};
+};
+
+&mmc {
+	status = "okay";
+	vmmc-supply = <&mmc_vcc>;
+	vqmmc-supply = <&mmc_vcc>;
+	/*cd-gpios = <&gpio 77 GPIO_ACTIVE_HIGH>;*/
+	pinctrl-names = "default";
+	pinctrl-0 = <&mmc_pins>;
+	bus-width = <1>;
 };

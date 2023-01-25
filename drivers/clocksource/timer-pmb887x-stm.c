@@ -17,30 +17,30 @@
 
 #include "timer-of.h"
 
-#define	PMB887X_STM_CLC		0x00
-#define	PMB887X_STM_ID		0x08
-#define	PMB887X_STM_TIM0	0x10
-#define	PMB887X_STM_TIM1	0x14
-#define	PMB887X_STM_TIM2	0x18
-#define	PMB887X_STM_TIM3	0x1C
-#define	PMB887X_STM_TIM4	0x20
-#define	PMB887X_STM_TIM5	0x24
-#define	PMB887X_STM_TIM6	0x28
-#define	PMB887X_STM_CAP		0x2C
+#define	STM_CLC		0x00
+#define	STM_ID		0x08
+#define	STM_TIM0	0x10
+#define	STM_TIM1	0x14
+#define	STM_TIM2	0x18
+#define	STM_TIM3	0x1C
+#define	STM_TIM4	0x20
+#define	STM_TIM5	0x24
+#define	STM_TIM6	0x28
+#define	STM_CAP		0x2C
 
-#define	PMB887X_STM_CLC_DISR						BIT(0)
-#define	PMB887X_STM_CLC_DISS						BIT(1)
-#define	PMB887X_STM_CLC_SPEN						BIT(2)
-#define	PMB887X_STM_CLC_EDIS						BIT(3)
-#define	PMB887X_STM_CLC_SBWE						BIT(4)
-#define	PMB887X_STM_CLC_FSOE						BIT(5)
-#define	PMB887X_STM_CLC_RMC							GENMASK(8, 8)
-#define	PMB887X_STM_CLC_RMC_SHIFT					8
+#define	STM_CLC_DISR		BIT(0)
+#define	STM_CLC_DISS		BIT(1)
+#define	STM_CLC_SPEN		BIT(2)
+#define	STM_CLC_EDIS		BIT(3)
+#define	STM_CLC_SBWE		BIT(4)
+#define	STM_CLC_FSOE		BIT(5)
+#define	STM_CLC_RMC			GENMASK(8, 8)
+#define	STM_CLC_RMC_SHIFT	8
 
 static void __iomem *stm_base;
 
 static u64 pmb887x_stm_read(void) {
-	return ((u64) readl(stm_base + PMB887X_STM_TIM6) << 32) | (u64) readl(stm_base + PMB887X_STM_TIM0);
+	return ((u64) readl(stm_base + STM_TIM6) << 32) | (u64) readl(stm_base + STM_TIM0);
 }
 
 static u64 pmb887x_stm_clocksource_read(struct clocksource *cs) {
@@ -74,7 +74,7 @@ static int __init pmb887x_stm_init(struct device_node *node) {
 	ret = clocksource_register_hz(&pmb887x_stm, timer_of_rate(to));
 	if (ret)
 		goto deinit;
-	sched_clock_register(pmb887x_stm_read, 64, timer_of_rate(to));
+	sched_clock_register(pmb887x_stm_read, 56, timer_of_rate(to));
 	
 	return 0;
 

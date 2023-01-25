@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #define pr_fmt(fmt) "pmb887x-clc: " fmt
 
-#define DEBUG 1
-
 #include <linux/bitops.h>
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/io.h>
+#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -22,7 +21,7 @@
 #define	PMB887X_MOD_CLC_EDIS			BIT(3)
 #define	PMB887X_MOD_CLC_SBWE			BIT(4)
 #define	PMB887X_MOD_CLC_FSOE			BIT(5)
-#define	PMB887X_MOD_CLC_RMC				GENMASK(8, 8)
+#define	PMB887X_MOD_CLC_RMC				GENMASK(15, 8)
 #define	PMB887X_MOD_CLC_RMC_SHIFT		8
 
 #define to_clc(_hw) container_of(_hw, struct pmb887x_clc, hw)
@@ -55,15 +54,16 @@ static int pmb887x_clc_set_rate(struct clk_hw *hw, unsigned long rate, unsigned 
 	
 	clc->rmc = parent_rate / rate;
 	
-	reg_value = readl(clc->reg) & ~PMB887X_MOD_CLC_RMC;
-	reg_value |= clc->rmc << PMB887X_MOD_CLC_RMC_SHIFT;
-	writel(reg_value, clc->reg);
+	if (pmb887x_clc_is_enabled(hw)) {
+		reg_value = readl(clc->reg) & ~PMB887X_MOD_CLC_RMC;
+		reg_value |= clc->rmc << PMB887X_MOD_CLC_RMC_SHIFT;
+		writel(reg_value, clc->reg);
+	}
 	
 	return 0;
 }
 
 static long pmb887x_clc_round_rate(struct clk_hw *hw, unsigned long rate, unsigned long *parent_rate) {
-	struct pmb887x_clc *clc = to_clc(hw);
 	u32 new_rmc = DIV_ROUND_CLOSEST(*parent_rate, rate);
 	return *parent_rate / max(1U, min(0xFFU, new_rmc));
 }
@@ -120,8 +120,11 @@ static void __init pmb887x_clc_of(struct device_node *np) {
 	const char *clk_name = np->name;
 	const char *parent_name;
 	void __iomem *reg;
+	int index;
+	u32 rate;
 	
-	reg = of_iomap(of_get_parent(np), 0);
+	index = of_property_match_string(of_get_parent(np), "reg-names", "pmb887x-clc");
+	reg = of_iomap(of_get_parent(np), index > 0 ? index : 0);
 	if (!reg) {
 		pr_err("%pOFn: must have REG in the parent node.\n", np);
 		return;
@@ -135,6 +138,13 @@ static void __init pmb887x_clc_of(struct device_node *np) {
 	}
 	
 	of_clk_add_hw_provider(np, of_clk_hw_simple_get, hw);
+	
+	pr_debug("%pOFn: registered clk", np);
+	
+	if (of_property_read_u32(np, "clock-frequency", &rate) == 0) {
+		pr_debug("%pOFn: set initial freq: %d Hz", np, rate);
+		clk_set_rate(hw->clk, rate);
+	}
 }
 
 CLK_OF_DECLARE(pmb887x_clk_clc, "pmb887x,clc", pmb887x_clc_of);

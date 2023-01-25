@@ -6,6 +6,9 @@ menuconfig ARCH_PMB887X
 	select ARM_AMBA
 	select PMB887X_TPU
 	select PMB887X_STM
+	select PINCTRL
+	select PINCTRL_PMB887X
+	select SERIAL_PMB887X
 
 if ARCH_PMB887X
 

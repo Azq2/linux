@@ -557,7 +557,7 @@ nvme_fc_rport_get(struct nvme_fc_rport *rport)
 static void
 nvme_fc_resume_controller(struct nvme_fc_ctrl *ctrl)
 {
-	switch (ctrl->ctrl.state) {
+	switch (nvme_ctrl_state(&ctrl->ctrl)) {
 	case NVME_CTRL_NEW:
 	case NVME_CTRL_CONNECTING:
 		/*
@@ -793,7 +793,7 @@ nvme_fc_ctrl_connectivity_loss(struct nvme_fc_ctrl *ctrl)
 		"NVME-FC{%d}: controller connectivity lost. Awaiting "
 		"Reconnect", ctrl->cnum);
 
-	switch (ctrl->ctrl.state) {
+	switch (nvme_ctrl_state(&ctrl->ctrl)) {
 	case NVME_CTRL_NEW:
 	case NVME_CTRL_LIVE:
 		/*
@@ -1218,10 +1218,10 @@ nvme_fc_connect_admin_queue(struct nvme_fc_ctrl *ctrl,
 	/* Linux supports only Dynamic controllers */
 	assoc_rqst->assoc_cmd.cntlid = cpu_to_be16(0xffff);
 	uuid_copy(&assoc_rqst->assoc_cmd.hostid, &ctrl->ctrl.opts->host->id);
-	strncpy(assoc_rqst->assoc_cmd.hostnqn, ctrl->ctrl.opts->host->nqn,
-		min(FCNVME_ASSOC_HOSTNQN_LEN, NVMF_NQN_SIZE));
-	strncpy(assoc_rqst->assoc_cmd.subnqn, ctrl->ctrl.opts->subsysnqn,
-		min(FCNVME_ASSOC_SUBNQN_LEN, NVMF_NQN_SIZE));
+	strscpy(assoc_rqst->assoc_cmd.hostnqn, ctrl->ctrl.opts->host->nqn,
+		sizeof(assoc_rqst->assoc_cmd.hostnqn));
+	strscpy(assoc_rqst->assoc_cmd.subnqn, ctrl->ctrl.opts->subsysnqn,
+		sizeof(assoc_rqst->assoc_cmd.subnqn));
 
 	lsop->queue = queue;
 	lsreq->rqstaddr = assoc_rqst;
@@ -1924,7 +1924,7 @@ char *nvme_fc_io_getuuid(struct nvmefc_fcp_req *req)
 	struct nvme_fc_fcp_op *op = fcp_req_to_fcp_op(req);
 	struct request *rq = op->rq;
 
-	if (!IS_ENABLED(CONFIG_BLK_CGROUP_FC_APPID) || !rq->bio)
+	if (!IS_ENABLED(CONFIG_BLK_CGROUP_FC_APPID) || !rq || !rq->bio)
 		return NULL;
 	return blkcg_get_fc_appid(rq->bio);
 }
@@ -2551,6 +2551,9 @@ nvme_fc_error_recovery(struct nvme_fc_ctrl *ctrl, char *errmsg)
 	if (ctrl->ctrl.state == NVME_CTRL_CONNECTING) {
 		__nvme_fc_abort_outstanding_ios(ctrl, true);
 		set_bit(ASSOC_FAILED, &ctrl->flags);
+		dev_warn(ctrl->ctrl.device,
+			"NVME-FC{%d}: transport error during (re)connect\n",
+			ctrl->cnum);
 		return;
 	}
 
@@ -2917,8 +2920,8 @@ nvme_fc_create_io_queues(struct nvme_fc_ctrl *ctrl)
 
 	ret = nvme_alloc_io_tag_set(&ctrl->ctrl, &ctrl->tag_set,
 			&nvme_fc_mq_ops, 1,
-			struct_size((struct nvme_fcp_op_w_sgl *)NULL, priv,
-				    ctrl->lport->ops->fcprqst_priv_sz));
+			struct_size_t(struct nvme_fcp_op_w_sgl, priv,
+				      ctrl->lport->ops->fcprqst_priv_sz));
 	if (ret)
 		return ret;
 
@@ -3110,7 +3113,9 @@ nvme_fc_create_association(struct nvme_fc_ctrl *ctrl)
 	 */
 
 	ret = nvme_enable_ctrl(&ctrl->ctrl);
-	if (ret || test_bit(ASSOC_FAILED, &ctrl->flags))
+	if (!ret && test_bit(ASSOC_FAILED, &ctrl->flags))
+		ret = -EIO;
+	if (ret)
 		goto out_disconnect_admin_queue;
 
 	ctrl->ctrl.max_segments = ctrl->lport->ops->max_sgl_segments;
@@ -3120,9 +3125,12 @@ nvme_fc_create_association(struct nvme_fc_ctrl *ctrl)
 	nvme_unquiesce_admin_queue(&ctrl->ctrl);
 
 	ret = nvme_init_ctrl_finish(&ctrl->ctrl, false);
-	if (ret || test_bit(ASSOC_FAILED, &ctrl->flags))
+	if (ret)
 		goto out_disconnect_admin_queue;
-
+	if (test_bit(ASSOC_FAILED, &ctrl->flags)) {
+		ret = -EIO;
+		goto out_stop_keep_alive;
+	}
 	/* sanity checks */
 
 	/* FC-NVME does not have other data in the capsule */
@@ -3130,7 +3138,7 @@ nvme_fc_create_association(struct nvme_fc_ctrl *ctrl)
 		dev_err(ctrl->ctrl.device, "icdoff %d is not supported!\n",
 				ctrl->ctrl.icdoff);
 		ret = NVME_SC_INVALID_FIELD | NVME_SC_DNR;
-		goto out_disconnect_admin_queue;
+		goto out_stop_keep_alive;
 	}
 
 	/* FC-NVME supports normal SGL Data Block Descriptors */
@@ -3138,7 +3146,7 @@ nvme_fc_create_association(struct nvme_fc_ctrl *ctrl)
 		dev_err(ctrl->ctrl.device,
 			"Mandatory sgls are not supported!\n");
 		ret = NVME_SC_INVALID_FIELD | NVME_SC_DNR;
-		goto out_disconnect_admin_queue;
+		goto out_stop_keep_alive;
 	}
 
 	if (opts->queue_size > ctrl->ctrl.maxcmd) {
@@ -3165,7 +3173,9 @@ nvme_fc_create_association(struct nvme_fc_ctrl *ctrl)
 		else
 			ret = nvme_fc_recreate_io_queues(ctrl);
 	}
-	if (ret || test_bit(ASSOC_FAILED, &ctrl->flags))
+	if (!ret && test_bit(ASSOC_FAILED, &ctrl->flags))
+		ret = -EIO;
+	if (ret)
 		goto out_term_aen_ops;
 
 	changed = nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_LIVE);
@@ -3179,7 +3189,12 @@ nvme_fc_create_association(struct nvme_fc_ctrl *ctrl)
 
 out_term_aen_ops:
 	nvme_fc_term_aen_ops(ctrl);
+out_stop_keep_alive:
+	nvme_stop_keep_alive(&ctrl->ctrl);
 out_disconnect_admin_queue:
+	dev_warn(ctrl->ctrl.device,
+		"NVME-FC{%d}: create_assoc failed, assoc_id %llx ret %d\n",
+		ctrl->cnum, ctrl->association_id, ret);
 	/* send a Disconnect(association) LS to fc-nvme target */
 	nvme_fc_xmt_disconnect_assoc(ctrl);
 	spin_lock_irqsave(&ctrl->lock, flags);
@@ -3293,7 +3308,7 @@ nvme_fc_reconnect_or_delete(struct nvme_fc_ctrl *ctrl, int status)
 	unsigned long recon_delay = ctrl->ctrl.opts->reconnect_delay * HZ;
 	bool recon = true;
 
-	if (ctrl->ctrl.state != NVME_CTRL_CONNECTING)
+	if (nvme_ctrl_state(&ctrl->ctrl) != NVME_CTRL_CONNECTING)
 		return;
 
 	if (portptr->port_state == FC_OBJSTATE_ONLINE) {
@@ -3483,10 +3498,6 @@ nvme_fc_init_ctrl(struct device *dev, struct nvmf_ctrl_options *opts,
 
 	ctrl->ctrl.opts = opts;
 	ctrl->ctrl.nr_reconnects = 0;
-	if (lport->dev)
-		ctrl->ctrl.numa_node = dev_to_node(lport->dev);
-	else
-		ctrl->ctrl.numa_node = NUMA_NO_NODE;
 	INIT_LIST_HEAD(&ctrl->ctrl_list);
 	ctrl->lport = lport;
 	ctrl->rport = rport;
@@ -3521,13 +3532,6 @@ nvme_fc_init_ctrl(struct device *dev, struct nvmf_ctrl_options *opts,
 
 	nvme_fc_init_queue(ctrl, 0);
 
-	ret = nvme_alloc_admin_tag_set(&ctrl->ctrl, &ctrl->admin_tag_set,
-			&nvme_fc_admin_mq_ops,
-			struct_size((struct nvme_fcp_op_w_sgl *)NULL, priv,
-				    ctrl->lport->ops->fcprqst_priv_sz));
-	if (ret)
-		goto out_free_queues;
-
 	/*
 	 * Would have been nice to init io queues tag set as well.
 	 * However, we require interaction from the controller
@@ -3537,9 +3541,18 @@ nvme_fc_init_ctrl(struct device *dev, struct nvmf_ctrl_options *opts,
 
 	ret = nvme_init_ctrl(&ctrl->ctrl, dev, &nvme_fc_ctrl_ops, 0);
 	if (ret)
-		goto out_cleanup_tagset;
+		goto out_free_queues;
+	if (lport->dev)
+		ctrl->ctrl.numa_node = dev_to_node(lport->dev);
 
 	/* at this point, teardown path changes to ref counting on nvme ctrl */
+
+	ret = nvme_alloc_admin_tag_set(&ctrl->ctrl, &ctrl->admin_tag_set,
+			&nvme_fc_admin_mq_ops,
+			struct_size_t(struct nvme_fcp_op_w_sgl, priv,
+				      ctrl->lport->ops->fcprqst_priv_sz));
+	if (ret)
+		goto fail_ctrl;
 
 	spin_lock_irqsave(&rport->lock, flags);
 	list_add_tail(&ctrl->ctrl_list, &rport->ctrl_list);
@@ -3592,8 +3605,6 @@ fail_ctrl:
 
 	return ERR_PTR(-EIO);
 
-out_cleanup_tagset:
-	nvme_remove_admin_tag_set(&ctrl->ctrl);
 out_free_queues:
 	kfree(ctrl->queues);
 out_free_ida:
@@ -3877,7 +3888,6 @@ static const struct attribute_group *nvme_fc_attr_groups[] = {
 static struct class fc_class = {
 	.name = "fc",
 	.dev_groups = nvme_fc_attr_groups,
-	.owner = THIS_MODULE,
 };
 
 static int __init nvme_fc_init_module(void)

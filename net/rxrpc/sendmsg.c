@@ -50,15 +50,11 @@ static int rxrpc_wait_to_be_connected(struct rxrpc_call *call, long *timeo)
 	_enter("%d", call->debug_id);
 
 	if (rxrpc_call_state(call) != RXRPC_CALL_CLIENT_AWAIT_CONN)
-		return call->error;
+		goto no_wait;
 
 	add_wait_queue_exclusive(&call->waitq, &myself);
 
 	for (;;) {
-		ret = call->error;
-		if (ret < 0)
-			break;
-
 		switch (call->interruptibility) {
 		case RXRPC_INTERRUPTIBLE:
 		case RXRPC_PREINTERRUPTIBLE:
@@ -69,10 +65,9 @@ static int rxrpc_wait_to_be_connected(struct rxrpc_call *call, long *timeo)
 			set_current_state(TASK_UNINTERRUPTIBLE);
 			break;
 		}
-		if (rxrpc_call_state(call) != RXRPC_CALL_CLIENT_AWAIT_CONN) {
-			ret = call->error;
+
+		if (rxrpc_call_state(call) != RXRPC_CALL_CLIENT_AWAIT_CONN)
 			break;
-		}
 		if ((call->interruptibility == RXRPC_INTERRUPTIBLE ||
 		     call->interruptibility == RXRPC_PREINTERRUPTIBLE) &&
 		    signal_pending(current)) {
@@ -85,6 +80,7 @@ static int rxrpc_wait_to_be_connected(struct rxrpc_call *call, long *timeo)
 	remove_wait_queue(&call->waitq, &myself);
 	__set_current_state(TASK_RUNNING);
 
+no_wait:
 	if (ret == 0 && rxrpc_call_is_complete(call))
 		ret = call->error;
 
@@ -576,6 +572,7 @@ rxrpc_new_client_call_for_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg,
 	__acquires(&call->user_mutex)
 {
 	struct rxrpc_conn_parameters cp;
+	struct rxrpc_peer *peer;
 	struct rxrpc_call *call;
 	struct key *key;
 
@@ -588,21 +585,29 @@ rxrpc_new_client_call_for_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg,
 		return ERR_PTR(-EDESTADDRREQ);
 	}
 
+	peer = rxrpc_lookup_peer(rx->local, srx, GFP_KERNEL);
+	if (!peer) {
+		release_sock(&rx->sk);
+		return ERR_PTR(-ENOMEM);
+	}
+
 	key = rx->key;
 	if (key && !rx->key->payload.data[0])
 		key = NULL;
 
 	memset(&cp, 0, sizeof(cp));
 	cp.local		= rx->local;
+	cp.peer			= peer;
 	cp.key			= rx->key;
 	cp.security_level	= rx->min_sec_level;
 	cp.exclusive		= rx->exclusive | p->exclusive;
 	cp.upgrade		= p->upgrade;
 	cp.service_id		= srx->srx_service;
-	call = rxrpc_new_client_call(rx, &cp, srx, &p->call, GFP_KERNEL,
+	call = rxrpc_new_client_call(rx, &cp, &p->call, GFP_KERNEL,
 				     atomic_inc_return(&rxrpc_debug_id));
 	/* The socket is now unlocked */
 
+	rxrpc_put_peer(peer, rxrpc_peer_put_application);
 	_leave(" = %p\n", call);
 	return call;
 }
@@ -655,15 +660,19 @@ int rxrpc_do_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg, size_t len)
 		if (IS_ERR(call))
 			return PTR_ERR(call);
 		/* ... and we have the call lock. */
+		p.call.nr_timeouts = 0;
 		ret = 0;
 		if (rxrpc_call_is_complete(call))
 			goto out_put_unlock;
 	} else {
 		switch (rxrpc_call_state(call)) {
-		case RXRPC_CALL_UNINITIALISED:
 		case RXRPC_CALL_CLIENT_AWAIT_CONN:
-		case RXRPC_CALL_SERVER_PREALLOC:
 		case RXRPC_CALL_SERVER_SECURING:
+			if (p.command == RXRPC_CMD_SEND_ABORT)
+				break;
+			fallthrough;
+		case RXRPC_CALL_UNINITIALISED:
+		case RXRPC_CALL_SERVER_PREALLOC:
 			rxrpc_put_call(call, rxrpc_call_put_sendmsg);
 			ret = -EBUSY;
 			goto error_release_sock;
@@ -703,7 +712,7 @@ int rxrpc_do_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg, size_t len)
 		fallthrough;
 	case 1:
 		if (p.call.timeouts.hard > 0) {
-			j = msecs_to_jiffies(p.call.timeouts.hard);
+			j = p.call.timeouts.hard * HZ;
 			now = jiffies;
 			j += now;
 			WRITE_ONCE(call->expect_term_by, j);

@@ -87,7 +87,7 @@ static void rxrpc_client_conn_reap_timeout(struct timer_list *timer)
 	struct rxrpc_local *local =
 		container_of(timer, struct rxrpc_local, client_conn_reap_timer);
 
-	if (local->kill_all_client_conns &&
+	if (!local->kill_all_client_conns &&
 	    test_and_set_bit(RXRPC_CLIENT_CONN_REAP_TIMER, &local->client_conn_flags))
 		rxrpc_wake_up_io_thread(local);
 }
@@ -108,8 +108,10 @@ static struct rxrpc_local *rxrpc_alloc_local(struct net *net,
 		local->net = net;
 		local->rxnet = rxrpc_net(net);
 		INIT_HLIST_NODE(&local->link);
-		init_rwsem(&local->defrag_sem);
 		init_completion(&local->io_thread_ready);
+#ifdef CONFIG_AF_RXRPC_INJECT_RX_DELAY
+		skb_queue_head_init(&local->rx_delay_queue);
+#endif
 		skb_queue_head_init(&local->rx_queue);
 		INIT_LIST_HEAD(&local->conn_attend_q);
 		INIT_LIST_HEAD(&local->call_attend_q);
@@ -434,6 +436,9 @@ void rxrpc_destroy_local(struct rxrpc_local *local)
 	/* At this point, there should be no more packets coming in to the
 	 * local endpoint.
 	 */
+#ifdef CONFIG_AF_RXRPC_INJECT_RX_DELAY
+	rxrpc_purge_queue(&local->rx_delay_queue);
+#endif
 	rxrpc_purge_queue(&local->rx_queue);
 	rxrpc_purge_client_connections(local);
 }

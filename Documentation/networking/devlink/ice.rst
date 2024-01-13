@@ -7,6 +7,21 @@ ice devlink support
 This document describes the devlink features implemented by the ``ice``
 device driver.
 
+Parameters
+==========
+
+.. list-table:: Generic parameters implemented
+
+   * - Name
+     - Mode
+     - Notes
+   * - ``enable_roce``
+     - runtime
+     - mutually exclusive with ``enable_iwarp``
+   * - ``enable_iwarp``
+     - runtime
+     - mutually exclusive with ``enable_roce``
+
 Info versions
 =============
 
@@ -23,6 +38,10 @@ The ``ice`` driver reports the following versions
       - fixed
       - K65390-000
       - The Product Board Assembly (PBA) identifier of the board.
+    * - ``cgu.id``
+      - fixed
+      - 36
+      - The Clock Generation Unit (CGU) hardware revision identifier.
     * - ``fw.mgmt``
       - running
       - 2.1.7
@@ -89,6 +108,11 @@ The ``ice`` driver reports the following versions
       - running
       - 0xee16ced7
       - The first 4 bytes of the hash of the netlist module contents.
+    * - ``fw.cgu``
+      - running
+      - 8032.16973825.6021
+      - The version of Clock Generation Unit (CGU). Format:
+        <CGU type>.<configuration version>.<firmware version>.
 
 Flash Update
 ============
@@ -285,7 +309,7 @@ features are enabled after the hierarchy is exported, but before any
 changes are made.
 
 This feature is also dependent on switchdev being enabled in the system.
-It's required bacause devlink-rate requires devlink-port objects to be
+It's required because devlink-rate requires devlink-port objects to be
 present, and those objects are only created in switchdev mode.
 
 If the driver is set to the switchdev mode, it will export internal
@@ -320,7 +344,7 @@ nodes and nodes with children also can't be deleted.
     * - ``tx_weight``
       - allows for usage of Weighted Fair Queuing arbitration scheme among
         siblings. This arbitration scheme can be used simultaneously with
-        the strict priority. Range 1-200. Only relative values mater for
+        the strict priority. Range 1-200. Only relative values matter for
         arbitration.
 
 ``tx_priority`` and ``tx_weight`` can be used simultaneously. In that case

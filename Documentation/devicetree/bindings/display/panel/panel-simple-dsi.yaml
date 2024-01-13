@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: (GPL-2.0-only or BSD-2-Clause)
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 %YAML 1.2
 ---
 $id: http://devicetree.org/schemas/display/panel/panel-simple-dsi.yaml#
@@ -18,9 +18,6 @@ description: |
   or it may be a direct child node of the display.
 
   If the panel is more advanced a dedicated binding file is required.
-
-allOf:
-  - $ref: panel-common.yaml#
 
 properties:
 
@@ -45,6 +42,8 @@ properties:
       - lg,acx467akm-7
         # LG Corporation 7" WXGA TFT LCD panel
       - lg,ld070wx3-sl01
+        # LG Corporation 5" HD TFT LCD panel
+      - lg,lh500wx1-sd03
         # One Stop Displays OSD101T2587-53TS 10.1" 1920x1200 panel
       - osddisplays,osd101t2587-53ts
         # Panasonic 10" WUXGA TFT LCD panel
@@ -67,12 +66,31 @@ properties:
   reset-gpios: true
   port: true
   power-supply: true
+  vddio-supply: true
+
+allOf:
+  - $ref: panel-common.yaml#
+  - if:
+      properties:
+        compatible:
+          enum:
+            - samsung,s6e3fc2x01
+            - samsung,sofef00
+    then:
+      properties:
+        power-supply: false
+      required:
+        - vddio-supply
+    else:
+      properties:
+        vddio-supply: false
+      required:
+        - power-supply
 
 additionalProperties: false
 
 required:
   - compatible
-  - power-supply
   - reg
 
 examples:

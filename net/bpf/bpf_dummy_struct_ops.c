@@ -12,6 +12,11 @@ extern struct bpf_struct_ops bpf_bpf_dummy_ops;
 /* A common type for test_N with return value in bpf_dummy_ops */
 typedef int (*dummy_ops_test_ret_fn)(struct bpf_dummy_ops_state *state, ...);
 
+static int dummy_ops_test_ret_function(struct bpf_dummy_ops_state *state, ...)
+{
+	return 0;
+}
+
 struct bpf_dummy_ops_test_args {
 	u64 args[MAX_BPF_FUNC_ARGS];
 	struct bpf_dummy_ops_state state;
@@ -62,7 +67,7 @@ static int dummy_ops_copy_args(struct bpf_dummy_ops_test_args *args)
 
 static int dummy_ops_call_op(void *image, struct bpf_dummy_ops_test_args *args)
 {
-	dummy_ops_test_ret_fn test = (void *)image;
+	dummy_ops_test_ret_fn test = (void *)image + cfi_get_offset();
 	struct bpf_dummy_ops_state *state = NULL;
 
 	/* state needs to be NULL if args[0] is 0 */
@@ -101,12 +106,11 @@ int bpf_struct_ops_test_run(struct bpf_prog *prog, const union bpf_attr *kattr,
 		goto out;
 	}
 
-	image = bpf_jit_alloc_exec(PAGE_SIZE);
+	image = arch_alloc_bpf_trampoline(PAGE_SIZE);
 	if (!image) {
 		err = -ENOMEM;
 		goto out;
 	}
-	set_vm_flush_reset_perms(image);
 
 	link = kzalloc(sizeof(*link), GFP_USER);
 	if (!link) {
@@ -120,11 +124,12 @@ int bpf_struct_ops_test_run(struct bpf_prog *prog, const union bpf_attr *kattr,
 	op_idx = prog->expected_attach_type;
 	err = bpf_struct_ops_prepare_trampoline(tlinks, link,
 						&st_ops->func_models[op_idx],
+						&dummy_ops_test_ret_function,
 						image, image + PAGE_SIZE);
 	if (err < 0)
 		goto out;
 
-	set_memory_rox((long)image, 1);
+	arch_protect_bpf_trampoline(image, PAGE_SIZE);
 	prog_ret = dummy_ops_call_op(image, args);
 
 	err = dummy_ops_copy_args(args);
@@ -134,7 +139,7 @@ int bpf_struct_ops_test_run(struct bpf_prog *prog, const union bpf_attr *kattr,
 		err = -EFAULT;
 out:
 	kfree(args);
-	bpf_jit_free_exec(image);
+	arch_free_bpf_trampoline(image, PAGE_SIZE);
 	if (link)
 		bpf_link_put(&link->link);
 	kfree(tlinks);
@@ -154,16 +159,30 @@ static bool bpf_dummy_ops_is_valid_access(int off, int size,
 	return bpf_tracing_btf_ctx_access(off, size, type, prog, info);
 }
 
+static int bpf_dummy_ops_check_member(const struct btf_type *t,
+				      const struct btf_member *member,
+				      const struct bpf_prog *prog)
+{
+	u32 moff = __btf_member_bit_offset(t, member) / 8;
+
+	switch (moff) {
+	case offsetof(struct bpf_dummy_ops, test_sleepable):
+		break;
+	default:
+		if (prog->aux->sleepable)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int bpf_dummy_ops_btf_struct_access(struct bpf_verifier_log *log,
 					   const struct bpf_reg_state *reg,
-					   int off, int size, enum bpf_access_type atype,
-					   u32 *next_btf_id,
-					   enum bpf_type_flag *flag)
+					   int off, int size)
 {
 	const struct btf_type *state;
 	const struct btf_type *t;
 	s32 type_id;
-	int err;
 
 	type_id = btf_find_by_name_kind(reg->btf, "bpf_dummy_ops_state",
 					BTF_KIND_STRUCT);
@@ -177,11 +196,12 @@ static int bpf_dummy_ops_btf_struct_access(struct bpf_verifier_log *log,
 		return -EACCES;
 	}
 
-	err = btf_struct_access(log, reg, off, size, atype, next_btf_id, flag);
-	if (err < 0)
-		return err;
+	if (off + size > sizeof(struct bpf_dummy_ops_state)) {
+		bpf_log(log, "write access at off %d with size %d\n", off, size);
+		return -EACCES;
+	}
 
-	return atype == BPF_READ ? err : NOT_INIT;
+	return NOT_INIT;
 }
 
 static const struct bpf_verifier_ops bpf_dummy_verifier_ops = {
@@ -205,11 +225,35 @@ static void bpf_dummy_unreg(void *kdata)
 {
 }
 
+static int bpf_dummy_test_1(struct bpf_dummy_ops_state *cb)
+{
+	return 0;
+}
+
+static int bpf_dummy_test_2(struct bpf_dummy_ops_state *cb, int a1, unsigned short a2,
+			    char a3, unsigned long a4)
+{
+	return 0;
+}
+
+static int bpf_dummy_test_sleepable(struct bpf_dummy_ops_state *cb)
+{
+	return 0;
+}
+
+static struct bpf_dummy_ops __bpf_bpf_dummy_ops = {
+	.test_1 = bpf_dummy_test_1,
+	.test_2 = bpf_dummy_test_2,
+	.test_sleepable = bpf_dummy_test_sleepable,
+};
+
 struct bpf_struct_ops bpf_bpf_dummy_ops = {
 	.verifier_ops = &bpf_dummy_verifier_ops,
 	.init = bpf_dummy_init,
+	.check_member = bpf_dummy_ops_check_member,
 	.init_member = bpf_dummy_init_member,
 	.reg = bpf_dummy_reg,
 	.unreg = bpf_dummy_unreg,
 	.name = "bpf_dummy_ops",
+	.cfi_stubs = &__bpf_bpf_dummy_ops,
 };

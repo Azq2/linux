@@ -8,7 +8,7 @@
 void mana_ib_uncfg_vport(struct mana_ib_dev *dev, struct mana_ib_pd *pd,
 			 u32 port)
 {
-	struct gdma_dev *gd = dev->gdma_dev;
+	struct gdma_dev *gd = &dev->gdma_dev->gdma_context->mana;
 	struct mana_port_context *mpc;
 	struct net_device *ndev;
 	struct mana_context *mc;
@@ -31,7 +31,7 @@ void mana_ib_uncfg_vport(struct mana_ib_dev *dev, struct mana_ib_pd *pd,
 int mana_ib_cfg_vport(struct mana_ib_dev *dev, u32 port, struct mana_ib_pd *pd,
 		      u32 doorbell_id)
 {
-	struct gdma_dev *mdev = dev->gdma_dev;
+	struct gdma_dev *mdev = &dev->gdma_dev->gdma_context->mana;
 	struct mana_port_context *mpc;
 	struct mana_context *mc;
 	struct net_device *ndev;
@@ -249,7 +249,8 @@ static int
 mana_ib_gd_first_dma_region(struct mana_ib_dev *dev,
 			    struct gdma_context *gc,
 			    struct gdma_create_dma_region_req *create_req,
-			    size_t num_pages, mana_handle_t *gdma_region)
+			    size_t num_pages, mana_handle_t *gdma_region,
+			    u32 expected_status)
 {
 	struct gdma_create_dma_region_resp create_resp = {};
 	unsigned int create_req_msg_size;
@@ -261,7 +262,7 @@ mana_ib_gd_first_dma_region(struct mana_ib_dev *dev,
 
 	err = mana_gd_send_request(gc, create_req_msg_size, create_req,
 				   sizeof(create_resp), &create_resp);
-	if (err || create_resp.hdr.status) {
+	if (err || create_resp.hdr.status != expected_status) {
 		ibdev_dbg(&dev->ib_dev,
 			  "Failed to create DMA region: %d, 0x%x\n",
 			  err, create_resp.hdr.status);
@@ -372,14 +373,21 @@ int mana_ib_gd_create_dma_region(struct mana_ib_dev *dev, struct ib_umem *umem,
 
 	page_addr_list = create_req->page_addr_list;
 	rdma_umem_for_each_dma_block(umem, &biter, page_sz) {
+		u32 expected_status = 0;
+
 		page_addr_list[tail++] = rdma_block_iter_dma_address(&biter);
 		if (tail < num_pages_to_handle)
 			continue;
 
+		if (num_pages_processed + num_pages_to_handle <
+		    num_pages_total)
+			expected_status = GDMA_STATUS_MORE_ENTRIES;
+
 		if (!num_pages_processed) {
 			/* First create message */
 			err = mana_ib_gd_first_dma_region(dev, gc, create_req,
-							  tail, gdma_region);
+							  tail, gdma_region,
+							  expected_status);
 			if (err)
 				goto out;
 
@@ -392,14 +400,8 @@ int mana_ib_gd_create_dma_region(struct mana_ib_dev *dev, struct ib_umem *umem,
 			page_addr_list = add_req->page_addr_list;
 		} else {
 			/* Subsequent create messages */
-			u32 expected_s = 0;
-
-			if (num_pages_processed + num_pages_to_handle <
-			    num_pages_total)
-				expected_s = GDMA_STATUS_MORE_ENTRIES;
-
 			err = mana_ib_gd_add_dma_region(dev, gc, add_req, tail,
-							expected_s);
+							expected_status);
 			if (err)
 				break;
 		}
@@ -484,20 +486,17 @@ int mana_ib_get_port_immutable(struct ib_device *ibdev, u32 port_num,
 int mana_ib_query_device(struct ib_device *ibdev, struct ib_device_attr *props,
 			 struct ib_udata *uhw)
 {
-	props->max_qp = MANA_MAX_NUM_QUEUES;
-	props->max_qp_wr = MAX_SEND_BUFFERS_PER_QUEUE;
+	struct mana_ib_dev *dev = container_of(ibdev,
+			struct mana_ib_dev, ib_dev);
 
-	/*
-	 * max_cqe could be potentially much bigger.
-	 * As this version of driver only support RAW QP, set it to the same
-	 * value as max_qp_wr
-	 */
-	props->max_cqe = MAX_SEND_BUFFERS_PER_QUEUE;
-
+	props->max_qp = dev->adapter_caps.max_qp_count;
+	props->max_qp_wr = dev->adapter_caps.max_qp_wr;
+	props->max_cq = dev->adapter_caps.max_cq_count;
+	props->max_cqe = dev->adapter_caps.max_qp_wr;
+	props->max_mr = dev->adapter_caps.max_mr_count;
 	props->max_mr_size = MANA_IB_MAX_MR_SIZE;
-	props->max_mr = MANA_IB_MAX_MR;
-	props->max_send_sge = MAX_TX_WQE_SGL_ENTRIES;
-	props->max_recv_sge = MAX_RX_WQE_SGL_ENTRIES;
+	props->max_send_sge = dev->adapter_caps.max_send_sge_count;
+	props->max_recv_sge = dev->adapter_caps.max_recv_sge_count;
 
 	return 0;
 }
@@ -518,4 +517,46 @@ int mana_ib_query_gid(struct ib_device *ibdev, u32 port, int index,
 
 void mana_ib_disassociate_ucontext(struct ib_ucontext *ibcontext)
 {
+}
+
+int mana_ib_gd_query_adapter_caps(struct mana_ib_dev *dev)
+{
+	struct mana_ib_adapter_caps *caps = &dev->adapter_caps;
+	struct mana_ib_query_adapter_caps_resp resp = {};
+	struct mana_ib_query_adapter_caps_req req = {};
+	int err;
+
+	mana_gd_init_req_hdr(&req.hdr, MANA_IB_GET_ADAPTER_CAP, sizeof(req),
+			     sizeof(resp));
+	req.hdr.resp.msg_version = GDMA_MESSAGE_V3;
+	req.hdr.dev_id = dev->gdma_dev->dev_id;
+
+	err = mana_gd_send_request(dev->gdma_dev->gdma_context, sizeof(req),
+				   &req, sizeof(resp), &resp);
+
+	if (err) {
+		ibdev_err(&dev->ib_dev,
+			  "Failed to query adapter caps err %d", err);
+		return err;
+	}
+
+	caps->max_sq_id = resp.max_sq_id;
+	caps->max_rq_id = resp.max_rq_id;
+	caps->max_cq_id = resp.max_cq_id;
+	caps->max_qp_count = resp.max_qp_count;
+	caps->max_cq_count = resp.max_cq_count;
+	caps->max_mr_count = resp.max_mr_count;
+	caps->max_pd_count = resp.max_pd_count;
+	caps->max_inbound_read_limit = resp.max_inbound_read_limit;
+	caps->max_outbound_read_limit = resp.max_outbound_read_limit;
+	caps->mw_count = resp.mw_count;
+	caps->max_srq_count = resp.max_srq_count;
+	caps->max_qp_wr = min_t(u32,
+				resp.max_requester_sq_size / GDMA_MAX_SQE_SIZE,
+				resp.max_requester_rq_size / GDMA_MAX_RQE_SIZE);
+	caps->max_inline_data_size = resp.max_inline_data_size;
+	caps->max_send_sge_count = resp.max_send_sge_count;
+	caps->max_recv_sge_count = resp.max_recv_sge_count;
+
+	return 0;
 }

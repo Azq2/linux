@@ -216,6 +216,22 @@ static int intel_memory_region_memtest(struct intel_memory_region *mem,
 	return err;
 }
 
+static const char *region_type_str(u16 type)
+{
+	switch (type) {
+	case INTEL_MEMORY_SYSTEM:
+		return "system";
+	case INTEL_MEMORY_LOCAL:
+		return "local";
+	case INTEL_MEMORY_STOLEN_LOCAL:
+		return "stolen-local";
+	case INTEL_MEMORY_STOLEN_SYSTEM:
+		return "stolen-system";
+	default:
+		return "unknown";
+	}
+}
+
 struct intel_memory_region *
 intel_memory_region_create(struct drm_i915_private *i915,
 			   resource_size_t start,
@@ -235,7 +251,7 @@ intel_memory_region_create(struct drm_i915_private *i915,
 		return ERR_PTR(-ENOMEM);
 
 	mem->i915 = i915;
-	mem->region = (struct resource)DEFINE_RES_MEM(start, size);
+	mem->region = DEFINE_RES_MEM(start, size);
 	mem->io_start = io_start;
 	mem->io_size = io_size;
 	mem->min_page_size = min_page_size;
@@ -243,6 +259,9 @@ intel_memory_region_create(struct drm_i915_private *i915,
 	mem->total = size;
 	mem->type = type;
 	mem->instance = instance;
+
+	snprintf(mem->uabi_name, sizeof(mem->uabi_name), "%s%u",
+		 region_type_str(type), instance);
 
 	mutex_init(&mem->objects.lock);
 	INIT_LIST_HEAD(&mem->objects.list);

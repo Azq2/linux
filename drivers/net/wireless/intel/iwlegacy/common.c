@@ -541,6 +541,9 @@ il_leds_init(struct il_priv *il)
 
 	il->led.name =
 	    kasprintf(GFP_KERNEL, "%s-led", wiphy_name(il->hw->wiphy));
+	if (!il->led.name)
+		return;
+
 	il->led.brightness_set = il_led_brightness_set;
 	il->led.blink_set = il_led_blink_set;
 	il->led.max_brightness = 1;
@@ -4090,7 +4093,7 @@ il_chswitch_done(struct il_priv *il, bool is_success)
 		return;
 
 	if (test_and_clear_bit(S_CHANNEL_SWITCH_PENDING, &il->status))
-		ieee80211_chswitch_done(il->vif, is_success);
+		ieee80211_chswitch_done(il->vif, is_success, 0);
 }
 EXPORT_SYMBOL(il_chswitch_done);
 
@@ -5174,7 +5177,7 @@ il_mac_reset_tsf(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	memset(&il->current_ht_config, 0, sizeof(struct il_ht_config));
 
 	/* new association get rid of ibss beacon skb */
-	dev_kfree_skb(il->beacon_skb);
+	dev_consume_skb_irq(il->beacon_skb);
 	il->beacon_skb = NULL;
 	il->timestamp = 0;
 
@@ -5293,7 +5296,7 @@ il_beacon_update(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	}
 
 	spin_lock_irqsave(&il->lock, flags);
-	dev_kfree_skb(il->beacon_skb);
+	dev_consume_skb_irq(il->beacon_skb);
 	il->beacon_skb = skb;
 
 	timestamp = ((struct ieee80211_mgmt *)skb->data)->u.beacon.timestamp;

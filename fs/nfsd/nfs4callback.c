@@ -31,6 +31,7 @@
  *  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <linux/nfs4.h>
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/xprt.h>
 #include <linux/sunrpc/svc_xprt.h>
@@ -86,31 +87,6 @@ static void encode_bitmap4(struct xdr_stream *xdr, const __u32 *bitmap,
 {
 	WARN_ON_ONCE(xdr_stream_encode_uint32_array(xdr, bitmap, len) < 0);
 }
-
-/*
- *	nfs_cb_opnum4
- *
- *	enum nfs_cb_opnum4 {
- *		OP_CB_GETATTR		= 3,
- *		  ...
- *	};
- */
-enum nfs_cb_opnum4 {
-	OP_CB_GETATTR			= 3,
-	OP_CB_RECALL			= 4,
-	OP_CB_LAYOUTRECALL		= 5,
-	OP_CB_NOTIFY			= 6,
-	OP_CB_PUSH_DELEG		= 7,
-	OP_CB_RECALL_ANY		= 8,
-	OP_CB_RECALLABLE_OBJ_AVAIL	= 9,
-	OP_CB_RECALL_SLOT		= 10,
-	OP_CB_SEQUENCE			= 11,
-	OP_CB_WANTS_CANCELLED		= 12,
-	OP_CB_NOTIFY_LOCK		= 13,
-	OP_CB_NOTIFY_DEVICEID		= 14,
-	OP_CB_OFFLOAD			= 15,
-	OP_CB_ILLEGAL			= 10044
-};
 
 static void encode_nfs_cb_opnum4(struct xdr_stream *xdr, enum nfs_cb_opnum4 op)
 {
@@ -946,8 +922,8 @@ static const struct cred *get_backchannel_cred(struct nfs4_client *clp, struct r
 		if (!kcred)
 			return NULL;
 
-		kcred->uid = ses->se_cb_sec.uid;
-		kcred->gid = ses->se_cb_sec.gid;
+		kcred->fsuid = ses->se_cb_sec.uid;
+		kcred->fsgid = ses->se_cb_sec.gid;
 		return kcred;
 	}
 }

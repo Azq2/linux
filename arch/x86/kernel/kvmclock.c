@@ -42,7 +42,7 @@ static int __init parse_no_kvmclock_vsyscall(char *arg)
 }
 early_param("no-kvmclock-vsyscall", parse_no_kvmclock_vsyscall);
 
-/* Aligned to page sizes to match whats mapped via vsyscalls to userspace */
+/* Aligned to page sizes to match what's mapped via vsyscalls to userspace */
 #define HVC_BOOT_ARRAY_SIZE \
 	(PAGE_SIZE / sizeof(struct pvclock_vsyscall_time_info))
 
@@ -76,7 +76,7 @@ static u64 kvm_clock_read(void)
 	u64 ret;
 
 	preempt_disable_notrace();
-	ret = pvclock_clocksource_read(this_cpu_pvti());
+	ret = pvclock_clocksource_read_nowd(this_cpu_pvti());
 	preempt_enable_notrace();
 	return ret;
 }
@@ -86,9 +86,9 @@ static u64 kvm_clock_get_cycles(struct clocksource *cs)
 	return kvm_clock_read();
 }
 
-static u64 kvm_sched_clock_read(void)
+static noinstr u64 kvm_sched_clock_read(void)
 {
-	return kvm_clock_read() - kvm_sched_clock_offset;
+	return pvclock_clocksource_read_nowd(this_cpu_pvti()) - kvm_sched_clock_offset;
 }
 
 static inline void kvm_sched_clock_init(bool stable)

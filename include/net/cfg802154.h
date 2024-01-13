@@ -18,6 +18,9 @@
 
 struct wpan_phy;
 struct wpan_phy_cca;
+struct cfg802154_scan_request;
+struct cfg802154_beacon_request;
+struct ieee802154_addr;
 
 #ifdef CONFIG_IEEE802154_NL802154_EXPERIMENTAL
 struct ieee802154_llsec_device_key;
@@ -67,6 +70,20 @@ struct cfg802154_ops {
 				struct wpan_dev *wpan_dev, bool mode);
 	int	(*set_ackreq_default)(struct wpan_phy *wpan_phy,
 				      struct wpan_dev *wpan_dev, bool ackreq);
+	int	(*trigger_scan)(struct wpan_phy *wpan_phy,
+				struct cfg802154_scan_request *request);
+	int	(*abort_scan)(struct wpan_phy *wpan_phy,
+			      struct wpan_dev *wpan_dev);
+	int	(*send_beacons)(struct wpan_phy *wpan_phy,
+				struct cfg802154_beacon_request *request);
+	int	(*stop_beacons)(struct wpan_phy *wpan_phy,
+				struct wpan_dev *wpan_dev);
+	int	(*associate)(struct wpan_phy *wpan_phy,
+			     struct wpan_dev *wpan_dev,
+			     struct ieee802154_addr *coord);
+	int	(*disassociate)(struct wpan_phy *wpan_phy,
+				struct wpan_dev *wpan_dev,
+				struct ieee802154_addr *target);
 #ifdef CONFIG_IEEE802154_NL802154_EXPERIMENTAL
 	void	(*get_llsec_table)(struct wpan_phy *wpan_phy,
 				   struct wpan_dev *wpan_dev,
@@ -160,7 +177,8 @@ wpan_phy_cca_cmp(const struct wpan_phy_cca *a, const struct wpan_phy_cca *b)
 }
 
 /**
- * @WPAN_PHY_FLAG_TRANSMIT_POWER: Indicates that transceiver will support
+ * enum wpan_phy_flags - WPAN PHY state flags
+ * @WPAN_PHY_FLAG_TXPOWER: Indicates that transceiver will support
  *	transmit power setting.
  * @WPAN_PHY_FLAG_CCA_ED_LEVEL: Indicates that transceiver will support cca ed
  *	level setting.
@@ -168,12 +186,15 @@ wpan_phy_cca_cmp(const struct wpan_phy_cca *a, const struct wpan_phy_cca *b)
  *	setting.
  * @WPAN_PHY_FLAG_STATE_QUEUE_STOPPED: Indicates that the transmit queue was
  *	temporarily stopped.
+ * @WPAN_PHY_FLAG_DATAGRAMS_ONLY: Indicates that transceiver is only able to
+ *	send/receive datagrams.
  */
 enum wpan_phy_flags {
 	WPAN_PHY_FLAG_TXPOWER		= BIT(1),
 	WPAN_PHY_FLAG_CCA_ED_LEVEL	= BIT(2),
 	WPAN_PHY_FLAG_CCA_MODE		= BIT(3),
 	WPAN_PHY_FLAG_STATE_QUEUE_STOPPED = BIT(4),
+	WPAN_PHY_FLAG_DATAGRAMS_ONLY	= BIT(5),
 };
 
 struct wpan_phy {
@@ -241,6 +262,17 @@ static inline void wpan_phy_net_set(struct wpan_phy *wpan_phy, struct net *net)
 	write_pnet(&wpan_phy->_net, net);
 }
 
+static inline bool ieee802154_chan_is_valid(struct wpan_phy *phy,
+					    u8 page, u8 channel)
+{
+	if (page > IEEE802154_MAX_PAGE ||
+	    channel > IEEE802154_MAX_CHANNEL ||
+	    !(phy->supported.channels[page] & BIT(channel)))
+		return false;
+
+	return true;
+}
+
 /**
  * struct ieee802154_addr - IEEE802.15.4 device address
  * @mode: Address mode from frame header. Can be one of:
@@ -276,6 +308,76 @@ struct ieee802154_coord_desc {
 	u16 superframe_spec;
 	u8 link_quality;
 	bool gts_permit;
+};
+
+/**
+ * struct ieee802154_pan_device - PAN device information
+ * @pan_id: the PAN ID of this device
+ * @mode: the preferred mode to reach the device
+ * @short_addr: the short address of this device
+ * @extended_addr: the extended address of this device
+ * @node: the list node
+ */
+struct ieee802154_pan_device {
+	__le16 pan_id;
+	u8 mode;
+	__le16 short_addr;
+	__le64 extended_addr;
+	struct list_head node;
+};
+
+/**
+ * struct cfg802154_scan_request - Scan request
+ *
+ * @type: type of scan to be performed
+ * @page: page on which to perform the scan
+ * @channels: channels in te %page to be scanned
+ * @duration: time spent on each channel, calculated with:
+ *            aBaseSuperframeDuration * (2 ^ duration + 1)
+ * @wpan_dev: the wpan device on which to perform the scan
+ * @wpan_phy: the wpan phy on which to perform the scan
+ */
+struct cfg802154_scan_request {
+	enum nl802154_scan_types type;
+	u8 page;
+	u32 channels;
+	u8 duration;
+	struct wpan_dev *wpan_dev;
+	struct wpan_phy *wpan_phy;
+};
+
+/**
+ * struct cfg802154_beacon_request - Beacon request descriptor
+ *
+ * @interval: interval n between sendings, in multiple order of the super frame
+ *            duration: aBaseSuperframeDuration * (2^n) unless the interval
+ *            order is greater or equal to 15, in this case beacons won't be
+ *            passively sent out at a fixed rate but instead inform the device
+ *            that it should answer beacon requests as part of active scan
+ *            procedures
+ * @wpan_dev: the concerned wpan device
+ * @wpan_phy: the wpan phy this was for
+ */
+struct cfg802154_beacon_request {
+	u8 interval;
+	struct wpan_dev *wpan_dev;
+	struct wpan_phy *wpan_phy;
+};
+
+/**
+ * struct cfg802154_mac_pkt - MAC packet descriptor (beacon/command)
+ * @node: MAC packets to process list member
+ * @skb: the received sk_buff
+ * @sdata: the interface on which @skb was received
+ * @page: page configuration when @skb was received
+ * @channel: channel configuration when @skb was received
+ */
+struct cfg802154_mac_pkt {
+	struct list_head node;
+	struct sk_buff *skb;
+	struct ieee802154_sub_if_data *sdata;
+	u8 page;
+	u8 channel;
 };
 
 struct ieee802154_llsec_key_id {
@@ -399,6 +501,13 @@ struct wpan_dev {
 
 	/* fallback for acknowledgment bit setting */
 	bool ackreq;
+
+	/* Associations */
+	struct mutex association_lock;
+	struct ieee802154_pan_device *parent;
+	struct list_head children;
+	unsigned int max_associations;
+	unsigned int nchildren;
 };
 
 #define to_phy(_dev)	container_of(_dev, struct wpan_phy, dev)
@@ -447,6 +556,49 @@ static inline const char *wpan_phy_name(struct wpan_phy *phy)
 	return dev_name(&phy->dev);
 }
 
-void ieee802154_configure_durations(struct wpan_phy *phy);
+void ieee802154_configure_durations(struct wpan_phy *phy,
+				    unsigned int page, unsigned int channel);
+
+/**
+ * cfg802154_device_is_associated - Checks whether we are associated to any device
+ * @wpan_dev: the wpan device
+ * @return: true if we are associated
+ */
+bool cfg802154_device_is_associated(struct wpan_dev *wpan_dev);
+
+/**
+ * cfg802154_device_is_parent - Checks if a device is our coordinator
+ * @wpan_dev: the wpan device
+ * @target: the expected parent
+ * @return: true if @target is our coordinator
+ */
+bool cfg802154_device_is_parent(struct wpan_dev *wpan_dev,
+				struct ieee802154_addr *target);
+
+/**
+ * cfg802154_device_is_child - Checks whether a device is associated to us
+ * @wpan_dev: the wpan device
+ * @target: the expected child
+ * @return: the PAN device
+ */
+struct ieee802154_pan_device *
+cfg802154_device_is_child(struct wpan_dev *wpan_dev,
+			  struct ieee802154_addr *target);
+
+/**
+ * cfg802154_set_max_associations - Limit the number of future associations
+ * @wpan_dev: the wpan device
+ * @max: the maximum number of devices we accept to associate
+ * @return: the old maximum value
+ */
+unsigned int cfg802154_set_max_associations(struct wpan_dev *wpan_dev,
+					    unsigned int max);
+
+/**
+ * cfg802154_get_free_short_addr - Get a free address among the known devices
+ * @wpan_dev: the wpan device
+ * @return: a random short address expectedly unused on our PAN
+ */
+__le16 cfg802154_get_free_short_addr(struct wpan_dev *wpan_dev);
 
 #endif /* __NET_CFG802154_H */

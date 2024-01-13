@@ -47,7 +47,7 @@ static int tpg_set_fmt(struct v4l2_subdev *sd,
 	/* only raw8 grbg is supported by TPG */
 	fmt->code = MEDIA_BUS_FMT_SGRBG8_1X8;
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY) {
-		sd_state->pads->try_fmt = *fmt;
+		*v4l2_subdev_state_get_format(sd_state, 0) = *fmt;
 		return 0;
 	}
 	return 0;
@@ -152,7 +152,7 @@ int atomisp_tpg_init(struct atomisp_device *isp)
 	v4l2_set_subdevdata(sd, tpg);
 
 	pads[0].flags = MEDIA_PAD_FL_SINK;
-	me->function = MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN;
+	me->function = MEDIA_ENT_F_PROC_VIDEO_ISP;
 
 	ret = media_entity_pads_init(me, 1, pads);
 	if (ret < 0)

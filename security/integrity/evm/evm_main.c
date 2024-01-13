@@ -14,17 +14,17 @@
 #define pr_fmt(fmt) "EVM: "fmt
 
 #include <linux/init.h>
-#include <linux/crypto.h>
 #include <linux/audit.h>
 #include <linux/xattr.h>
 #include <linux/integrity.h>
 #include <linux/evm.h>
 #include <linux/magic.h>
 #include <linux/posix_acl_xattr.h>
+#include <linux/lsm_hooks.h>
 
 #include <crypto/hash.h>
 #include <crypto/hash_info.h>
-#include <crypto/algapi.h>
+#include <crypto/utils.h>
 #include "evm.h"
 
 int evm_initialized;
@@ -151,6 +151,17 @@ static int evm_find_protected_xattrs(struct dentry *dentry)
 	return count;
 }
 
+static int is_unsupported_fs(struct dentry *dentry)
+{
+	struct inode *inode = d_backing_inode(dentry);
+
+	if (inode->i_sb->s_iflags & SB_I_EVM_UNSUPPORTED) {
+		pr_info_once("%s not supported\n", inode->i_sb->s_type->name);
+		return 1;
+	}
+	return 0;
+}
+
 /*
  * evm_verify_hmac - calculate and compare the HMAC with the EVM xattr
  *
@@ -181,10 +192,13 @@ static enum integrity_status evm_verify_hmac(struct dentry *dentry,
 		     iint->evm_status == INTEGRITY_PASS_IMMUTABLE))
 		return iint->evm_status;
 
+	if (is_unsupported_fs(dentry))
+		return INTEGRITY_UNKNOWN;
+
 	/* if status is not PASS, try to check again - against -ENOMEM */
 
 	/* first need to know the sig type */
-	rc = vfs_getxattr_alloc(&init_user_ns, dentry, XATTR_NAME_EVM,
+	rc = vfs_getxattr_alloc(&nop_mnt_idmap, dentry, XATTR_NAME_EVM,
 				(char **)&xattr_data, 0, GFP_NOFS);
 	if (rc <= 0) {
 		evm_status = INTEGRITY_FAIL;
@@ -305,7 +319,7 @@ static int evm_protected_xattr_common(const char *req_xattr_name,
 	return found;
 }
 
-static int evm_protected_xattr(const char *req_xattr_name)
+int evm_protected_xattr(const char *req_xattr_name)
 {
 	return evm_protected_xattr_common(req_xattr_name, false);
 }
@@ -318,7 +332,6 @@ int evm_protected_xattr_if_enabled(const char *req_xattr_name)
 /**
  * evm_read_protected_xattrs - read EVM protected xattr names, lengths, values
  * @dentry: dentry of the read xattrs
- * @inode: inode of the read xattrs
  * @buffer: buffer xattr names, lengths or values are copied to
  * @buffer_size: size of buffer
  * @type: n: names, l: lengths, v: values
@@ -390,6 +403,7 @@ int evm_read_protected_xattrs(struct dentry *dentry, u8 *buffer,
  * @xattr_name: requested xattr
  * @xattr_value: requested xattr value
  * @xattr_value_len: requested xattr value length
+ * @iint: inode integrity metadata
  *
  * Calculate the HMAC for the given dentry and verify it against the stored
  * security.evm xattr. For performance, use the xattr value and length
@@ -406,6 +420,9 @@ enum integrity_status evm_verifyxattr(struct dentry *dentry,
 				      struct integrity_iint_cache *iint)
 {
 	if (!evm_key_loaded() || !evm_protected_xattr(xattr_name))
+		return INTEGRITY_UNKNOWN;
+
+	if (is_unsupported_fs(dentry))
 		return INTEGRITY_UNKNOWN;
 
 	if (!iint) {
@@ -436,7 +453,7 @@ static enum integrity_status evm_verify_current_integrity(struct dentry *dentry)
 
 /*
  * evm_xattr_change - check if passed xattr value differs from current value
- * @mnt_userns: user namespace of the idmapped mount
+ * @idmap: idmap of the mount
  * @dentry: pointer to the affected dentry
  * @xattr_name: requested xattr
  * @xattr_value: requested xattr value
@@ -446,14 +463,14 @@ static enum integrity_status evm_verify_current_integrity(struct dentry *dentry)
  *
  * Returns 1 if passed xattr value differs from current value, 0 otherwise.
  */
-static int evm_xattr_change(struct user_namespace *mnt_userns,
+static int evm_xattr_change(struct mnt_idmap *idmap,
 			    struct dentry *dentry, const char *xattr_name,
 			    const void *xattr_value, size_t xattr_value_len)
 {
 	char *xattr_data = NULL;
 	int rc = 0;
 
-	rc = vfs_getxattr_alloc(&init_user_ns, dentry, xattr_name, &xattr_data,
+	rc = vfs_getxattr_alloc(&nop_mnt_idmap, dentry, xattr_name, &xattr_data,
 				0, GFP_NOFS);
 	if (rc < 0) {
 		rc = 1;
@@ -482,7 +499,7 @@ out:
  * For posix xattr acls only, permit security.evm, even if it currently
  * doesn't exist, to be updated unless the EVM signature is immutable.
  */
-static int evm_protect_xattr(struct user_namespace *mnt_userns,
+static int evm_protect_xattr(struct mnt_idmap *idmap,
 			     struct dentry *dentry, const char *xattr_name,
 			     const void *xattr_value, size_t xattr_value_len)
 {
@@ -491,15 +508,21 @@ static int evm_protect_xattr(struct user_namespace *mnt_userns,
 	if (strcmp(xattr_name, XATTR_NAME_EVM) == 0) {
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
+		if (is_unsupported_fs(dentry))
+			return -EPERM;
 	} else if (!evm_protected_xattr(xattr_name)) {
 		if (!posix_xattr_acl(xattr_name))
 			return 0;
+		if (is_unsupported_fs(dentry))
+			return 0;
+
 		evm_status = evm_verify_current_integrity(dentry);
 		if ((evm_status == INTEGRITY_PASS) ||
 		    (evm_status == INTEGRITY_NOXATTRS))
 			return 0;
 		goto out;
-	}
+	} else if (is_unsupported_fs(dentry))
+		return 0;
 
 	evm_status = evm_verify_current_integrity(dentry);
 	if (evm_status == INTEGRITY_NOXATTRS) {
@@ -538,7 +561,7 @@ out:
 		return 0;
 
 	if (evm_status == INTEGRITY_PASS_IMMUTABLE &&
-	    !evm_xattr_change(mnt_userns, dentry, xattr_name, xattr_value,
+	    !evm_xattr_change(idmap, dentry, xattr_name, xattr_value,
 			      xattr_value_len))
 		return 0;
 
@@ -553,7 +576,7 @@ out:
 
 /**
  * evm_inode_setxattr - protect the EVM extended attribute
- * @mnt_userns: user namespace of the idmapped mount
+ * @idmap: idmap of the mount
  * @dentry: pointer to the affected dentry
  * @xattr_name: pointer to the affected extended attribute name
  * @xattr_value: pointer to the new extended attribute value
@@ -565,7 +588,7 @@ out:
  * userspace from writing HMAC value.  Writing 'security.evm' requires
  * requires CAP_SYS_ADMIN privileges.
  */
-int evm_inode_setxattr(struct user_namespace *mnt_userns, struct dentry *dentry,
+int evm_inode_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		       const char *xattr_name, const void *xattr_value,
 		       size_t xattr_value_len)
 {
@@ -584,20 +607,20 @@ int evm_inode_setxattr(struct user_namespace *mnt_userns, struct dentry *dentry,
 		    xattr_data->type != EVM_XATTR_PORTABLE_DIGSIG)
 			return -EPERM;
 	}
-	return evm_protect_xattr(mnt_userns, dentry, xattr_name, xattr_value,
+	return evm_protect_xattr(idmap, dentry, xattr_name, xattr_value,
 				 xattr_value_len);
 }
 
 /**
  * evm_inode_removexattr - protect the EVM extended attribute
- * @mnt_userns: user namespace of the idmapped mount
+ * @idmap: idmap of the mount
  * @dentry: pointer to the affected dentry
  * @xattr_name: pointer to the affected extended attribute name
  *
  * Removing 'security.evm' requires CAP_SYS_ADMIN privileges and that
  * the current value is valid.
  */
-int evm_inode_removexattr(struct user_namespace *mnt_userns,
+int evm_inode_removexattr(struct mnt_idmap *idmap,
 			  struct dentry *dentry, const char *xattr_name)
 {
 	/* Policy permits modification of the protected xattrs even though
@@ -606,11 +629,11 @@ int evm_inode_removexattr(struct user_namespace *mnt_userns,
 	if (evm_initialized & EVM_ALLOW_METADATA_WRITES)
 		return 0;
 
-	return evm_protect_xattr(mnt_userns, dentry, xattr_name, NULL, 0);
+	return evm_protect_xattr(idmap, dentry, xattr_name, NULL, 0);
 }
 
 #ifdef CONFIG_FS_POSIX_ACL
-static int evm_inode_set_acl_change(struct user_namespace *mnt_userns,
+static int evm_inode_set_acl_change(struct mnt_idmap *idmap,
 				    struct dentry *dentry, const char *name,
 				    struct posix_acl *kacl)
 {
@@ -622,14 +645,14 @@ static int evm_inode_set_acl_change(struct user_namespace *mnt_userns,
 	if (!kacl)
 		return 1;
 
-	rc = posix_acl_update_mode(mnt_userns, inode, &mode, &kacl);
+	rc = posix_acl_update_mode(idmap, inode, &mode, &kacl);
 	if (rc || (inode->i_mode != mode))
 		return 1;
 
 	return 0;
 }
 #else
-static inline int evm_inode_set_acl_change(struct user_namespace *mnt_userns,
+static inline int evm_inode_set_acl_change(struct mnt_idmap *idmap,
 					   struct dentry *dentry,
 					   const char *name,
 					   struct posix_acl *kacl)
@@ -640,7 +663,7 @@ static inline int evm_inode_set_acl_change(struct user_namespace *mnt_userns,
 
 /**
  * evm_inode_set_acl - protect the EVM extended attribute from posix acls
- * @mnt_userns: user namespace of the idmapped mount
+ * @idmap: idmap of the idmapped mount
  * @dentry: pointer to the affected dentry
  * @acl_name: name of the posix acl
  * @kacl: pointer to the posix acls
@@ -649,7 +672,7 @@ static inline int evm_inode_set_acl_change(struct user_namespace *mnt_userns,
  * and 'security.evm' xattr updated, unless the existing 'security.evm' is
  * valid.
  */
-int evm_inode_set_acl(struct user_namespace *mnt_userns, struct dentry *dentry,
+int evm_inode_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 		      const char *acl_name, struct posix_acl *kacl)
 {
 	enum integrity_status evm_status;
@@ -678,7 +701,7 @@ int evm_inode_set_acl(struct user_namespace *mnt_userns, struct dentry *dentry,
 		return 0;
 
 	if (evm_status == INTEGRITY_PASS_IMMUTABLE &&
-	    !evm_inode_set_acl_change(mnt_userns, dentry, acl_name, kacl))
+	    !evm_inode_set_acl_change(idmap, dentry, acl_name, kacl))
 		return 0;
 
 	if (evm_status != INTEGRITY_PASS_IMMUTABLE)
@@ -750,6 +773,9 @@ void evm_inode_post_setxattr(struct dentry *dentry, const char *xattr_name,
 	if (!(evm_initialized & EVM_INIT_HMAC))
 		return;
 
+	if (is_unsupported_fs(dentry))
+		return;
+
 	evm_update_evmxattr(dentry, xattr_name, xattr_value, xattr_value_len);
 }
 
@@ -779,14 +805,14 @@ void evm_inode_post_removexattr(struct dentry *dentry, const char *xattr_name)
 	evm_update_evmxattr(dentry, xattr_name, NULL, 0);
 }
 
-static int evm_attr_change(struct user_namespace *mnt_userns,
+static int evm_attr_change(struct mnt_idmap *idmap,
 			   struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = d_backing_inode(dentry);
 	unsigned int ia_valid = attr->ia_valid;
 
-	if (!i_uid_needs_update(mnt_userns, attr, inode) &&
-	    !i_gid_needs_update(mnt_userns, attr, inode) &&
+	if (!i_uid_needs_update(idmap, attr, inode) &&
+	    !i_gid_needs_update(idmap, attr, inode) &&
 	    (!(ia_valid & ATTR_MODE) || attr->ia_mode == inode->i_mode))
 		return 0;
 
@@ -795,12 +821,14 @@ static int evm_attr_change(struct user_namespace *mnt_userns,
 
 /**
  * evm_inode_setattr - prevent updating an invalid EVM extended attribute
+ * @idmap: idmap of the mount
  * @dentry: pointer to the affected dentry
+ * @attr: iattr structure containing the new file attributes
  *
  * Permit update of file attributes when files have a valid EVM signature,
  * except in the case of them having an immutable portable signature.
  */
-int evm_inode_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
+int evm_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		      struct iattr *attr)
 {
 	unsigned int ia_valid = attr->ia_valid;
@@ -812,8 +840,12 @@ int evm_inode_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
 	if (evm_initialized & EVM_ALLOW_METADATA_WRITES)
 		return 0;
 
+	if (is_unsupported_fs(dentry))
+		return 0;
+
 	if (!(ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID)))
 		return 0;
+
 	evm_status = evm_verify_current_integrity(dentry);
 	/*
 	 * Writing attrs is safe for portable signatures, as portable signatures
@@ -827,7 +859,7 @@ int evm_inode_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
 		return 0;
 
 	if (evm_status == INTEGRITY_PASS_IMMUTABLE &&
-	    !evm_attr_change(mnt_userns, dentry, attr))
+	    !evm_attr_change(idmap, dentry, attr))
 		return 0;
 
 	integrity_audit_msg(AUDIT_INTEGRITY_METADATA, d_backing_inode(dentry),
@@ -857,30 +889,64 @@ void evm_inode_post_setattr(struct dentry *dentry, int ia_valid)
 	if (!(evm_initialized & EVM_INIT_HMAC))
 		return;
 
+	if (is_unsupported_fs(dentry))
+		return;
+
 	if (ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID))
 		evm_update_evmxattr(dentry, NULL, NULL, 0);
+}
+
+int evm_inode_copy_up_xattr(const char *name)
+{
+	if (strcmp(name, XATTR_NAME_EVM) == 0)
+		return 1; /* Discard */
+	return -EOPNOTSUPP;
 }
 
 /*
  * evm_inode_init_security - initializes security.evm HMAC value
  */
-int evm_inode_init_security(struct inode *inode,
-				 const struct xattr *lsm_xattr,
-				 struct xattr *evm_xattr)
+int evm_inode_init_security(struct inode *inode, struct inode *dir,
+			    const struct qstr *qstr, struct xattr *xattrs,
+			    int *xattr_count)
 {
 	struct evm_xattr *xattr_data;
+	struct xattr *xattr, *evm_xattr;
+	bool evm_protected_xattrs = false;
 	int rc;
 
-	if (!(evm_initialized & EVM_INIT_HMAC) ||
-	    !evm_protected_xattr(lsm_xattr->name))
+	if (!(evm_initialized & EVM_INIT_HMAC) || !xattrs)
 		return 0;
+
+	/*
+	 * security_inode_init_security() makes sure that the xattrs array is
+	 * contiguous, there is enough space for security.evm, and that there is
+	 * a terminator at the end of the array.
+	 */
+	for (xattr = xattrs; xattr->name; xattr++) {
+		if (evm_protected_xattr(xattr->name))
+			evm_protected_xattrs = true;
+	}
+
+	/* EVM xattr not needed. */
+	if (!evm_protected_xattrs)
+		return 0;
+
+	evm_xattr = lsm_get_xattr_slot(xattrs, xattr_count);
+	/*
+	 * Array terminator (xattr name = NULL) must be the first non-filled
+	 * xattr slot.
+	 */
+	WARN_ONCE(evm_xattr != xattr,
+		  "%s: xattrs terminator is not the first non-filled slot\n",
+		  __func__);
 
 	xattr_data = kzalloc(sizeof(*xattr_data), GFP_NOFS);
 	if (!xattr_data)
 		return -ENOMEM;
 
 	xattr_data->data.type = EVM_XATTR_HMAC;
-	rc = evm_init_hmac(inode, lsm_xattr, xattr_data->digest);
+	rc = evm_init_hmac(inode, xattrs, xattr_data->digest);
 	if (rc < 0)
 		goto out;
 

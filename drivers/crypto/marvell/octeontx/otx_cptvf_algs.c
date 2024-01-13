@@ -138,7 +138,7 @@ static void otx_cpt_aead_callback(int status, void *arg1, void *arg2)
 
 complete:
 	if (areq)
-		areq->complete(areq, status);
+		crypto_request_complete(areq, status);
 }
 
 static void output_iv_copyback(struct crypto_async_request *areq)
@@ -188,7 +188,7 @@ static void otx_cpt_skcipher_callback(int status, void *arg1, void *arg2)
 			pdev = cpt_info->pdev;
 			do_request_cleanup(pdev, cpt_info);
 		}
-		areq->complete(areq, status);
+		crypto_request_complete(areq, status);
 	}
 }
 
@@ -398,7 +398,7 @@ static int otx_cpt_skcipher_xts_setkey(struct crypto_skcipher *tfm,
 	const u8 *key1 = key;
 	int ret;
 
-	ret = xts_check_key(crypto_skcipher_tfm(tfm), key, keylen);
+	ret = xts_verify_key(tfm, key, keylen);
 	if (ret)
 		return ret;
 	ctx->key_len = keylen;
@@ -471,12 +471,6 @@ static int otx_cpt_skcipher_ecb_aes_setkey(struct crypto_skcipher *tfm,
 					   const u8 *key, u32 keylen)
 {
 	return cpt_aes_setkey(tfm, key, keylen, OTX_CPT_AES_ECB);
-}
-
-static int otx_cpt_skcipher_cfb_aes_setkey(struct crypto_skcipher *tfm,
-					   const u8 *key, u32 keylen)
-{
-	return cpt_aes_setkey(tfm, key, keylen, OTX_CPT_AES_CFB);
 }
 
 static int otx_cpt_skcipher_cbc_des3_setkey(struct crypto_skcipher *tfm,
@@ -1349,23 +1343,6 @@ static struct skcipher_alg otx_cpt_skciphers[] = { {
 	.min_keysize = AES_MIN_KEY_SIZE,
 	.max_keysize = AES_MAX_KEY_SIZE,
 	.setkey = otx_cpt_skcipher_ecb_aes_setkey,
-	.encrypt = otx_cpt_skcipher_encrypt,
-	.decrypt = otx_cpt_skcipher_decrypt,
-}, {
-	.base.cra_name = "cfb(aes)",
-	.base.cra_driver_name = "cpt_cfb_aes",
-	.base.cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_ALLOCATES_MEMORY,
-	.base.cra_blocksize = AES_BLOCK_SIZE,
-	.base.cra_ctxsize = sizeof(struct otx_cpt_enc_ctx),
-	.base.cra_alignmask = 7,
-	.base.cra_priority = 4001,
-	.base.cra_module = THIS_MODULE,
-
-	.init = otx_cpt_enc_dec_init,
-	.ivsize = AES_BLOCK_SIZE,
-	.min_keysize = AES_MIN_KEY_SIZE,
-	.max_keysize = AES_MAX_KEY_SIZE,
-	.setkey = otx_cpt_skcipher_cfb_aes_setkey,
 	.encrypt = otx_cpt_skcipher_encrypt,
 	.decrypt = otx_cpt_skcipher_decrypt,
 }, {

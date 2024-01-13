@@ -63,7 +63,7 @@ struct list_head *zlib_alloc_workspace(unsigned int level)
 
 	workspacesize = max(zlib_deflate_workspacesize(MAX_WBITS, MAX_MEM_LEVEL),
 			zlib_inflate_workspacesize());
-	workspace->strm.workspace = kvmalloc(workspacesize, GFP_KERNEL);
+	workspace->strm.workspace = kvzalloc(workspacesize, GFP_KERNEL | __GFP_NOWARN);
 	workspace->level = level;
 	workspace->buf = NULL;
 	/*
@@ -121,7 +121,7 @@ int zlib_compress_pages(struct list_head *ws, struct address_space *mapping,
 	workspace->strm.total_in = 0;
 	workspace->strm.total_out = 0;
 
-	out_page = alloc_page(GFP_NOFS);
+	out_page = btrfs_alloc_compr_page();
 	if (out_page == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -200,7 +200,7 @@ int zlib_compress_pages(struct list_head *ws, struct address_space *mapping,
 				ret = -E2BIG;
 				goto out;
 			}
-			out_page = alloc_page(GFP_NOFS);
+			out_page = btrfs_alloc_compr_page();
 			if (out_page == NULL) {
 				ret = -ENOMEM;
 				goto out;
@@ -236,7 +236,7 @@ int zlib_compress_pages(struct list_head *ws, struct address_space *mapping,
 				ret = -E2BIG;
 				goto out;
 			}
-			out_page = alloc_page(GFP_NOFS);
+			out_page = btrfs_alloc_compr_page();
 			if (out_page == NULL) {
 				ret = -ENOMEM;
 				goto out;
@@ -350,8 +350,6 @@ done:
 	zlib_inflateEnd(&workspace->strm);
 	if (data_in)
 		kunmap_local(data_in);
-	if (!ret)
-		zero_fill_bio(cb->orig_bio);
 	return ret;
 }
 

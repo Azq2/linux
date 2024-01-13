@@ -1,8 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0
-# MPC8610 HPCD Machine Support
-snd-soc-mpc8610-hpcd-objs := mpc8610_hpcd.o
-obj-$(CONFIG_SND_SOC_MPC8610_HPCD) += snd-soc-mpc8610-hpcd.o
-
 # P1022 DS Machine Support
 snd-soc-p1022-ds-objs := p1022_ds.o
 obj-$(CONFIG_SND_SOC_P1022_DS) += snd-soc-p1022-ds.o
@@ -28,6 +24,7 @@ snd-soc-fsl-easrc-objs := fsl_easrc.o
 snd-soc-fsl-xcvr-objs := fsl_xcvr.o
 snd-soc-fsl-aud2htx-objs := fsl_aud2htx.o
 snd-soc-fsl-rpmsg-objs := fsl_rpmsg.o
+snd-soc-fsl-qmc-audio-objs := fsl_qmc_audio.o
 
 obj-$(CONFIG_SND_SOC_FSL_AUDMIX) += snd-soc-fsl-audmix.o
 obj-$(CONFIG_SND_SOC_FSL_ASOC_CARD) += snd-soc-fsl-asoc-card.o
@@ -44,6 +41,7 @@ obj-$(CONFIG_SND_SOC_POWERPC_DMA) += snd-soc-fsl-dma.o
 obj-$(CONFIG_SND_SOC_FSL_XCVR) += snd-soc-fsl-xcvr.o
 obj-$(CONFIG_SND_SOC_FSL_AUD2HTX) += snd-soc-fsl-aud2htx.o
 obj-$(CONFIG_SND_SOC_FSL_RPMSG) += snd-soc-fsl-rpmsg.o
+obj-$(CONFIG_SND_SOC_POWERPC_QMC_AUDIO) += snd-soc-fsl-qmc-audio.o
 
 # MPC5200 Platform Support
 obj-$(CONFIG_SND_MPC52xx_DMA) += mpc5200_dma.o

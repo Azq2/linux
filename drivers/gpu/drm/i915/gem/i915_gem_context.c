@@ -257,7 +257,7 @@ static int proto_context_set_protected(struct drm_i915_private *i915,
 
 	if (!protected) {
 		pc->uses_protected_content = false;
-	} else if (!intel_pxp_is_enabled(&to_gt(i915)->pxp)) {
+	} else if (!intel_pxp_is_enabled(i915->pxp)) {
 		ret = -ENODEV;
 	} else if ((pc->user_flags & BIT(UCONTEXT_RECOVERABLE)) ||
 		   !(pc->user_flags & BIT(UCONTEXT_BANNABLE))) {
@@ -271,15 +271,16 @@ static int proto_context_set_protected(struct drm_i915_private *i915,
 		 */
 		pc->pxp_wakeref = intel_runtime_pm_get(&i915->runtime_pm);
 
-		if (!intel_pxp_is_active(&to_gt(i915)->pxp))
-			ret = intel_pxp_start(&to_gt(i915)->pxp);
+		if (!intel_pxp_is_active(i915->pxp))
+			ret = intel_pxp_start(i915->pxp);
 	}
 
 	return ret;
 }
 
 static struct i915_gem_proto_context *
-proto_context_create(struct drm_i915_private *i915, unsigned int flags)
+proto_context_create(struct drm_i915_file_private *fpriv,
+		     struct drm_i915_private *i915, unsigned int flags)
 {
 	struct i915_gem_proto_context *pc, *err;
 
@@ -287,6 +288,7 @@ proto_context_create(struct drm_i915_private *i915, unsigned int flags)
 	if (!pc)
 		return ERR_PTR(-ENOMEM);
 
+	pc->fpriv = fpriv;
 	pc->num_user_engines = -1;
 	pc->user_engines = NULL;
 	pc->user_flags = BIT(UCONTEXT_BANNABLE) |
@@ -364,7 +366,7 @@ static int set_proto_ctx_vm(struct drm_i915_file_private *fpriv,
 			    struct i915_gem_proto_context *pc,
 			    const struct drm_i915_gem_context_param *args)
 {
-	struct drm_i915_private *i915 = fpriv->dev_priv;
+	struct drm_i915_private *i915 = fpriv->i915;
 	struct i915_address_space *vm;
 
 	if (args->size)
@@ -733,7 +735,7 @@ static int set_proto_ctx_engines(struct drm_i915_file_private *fpriv,
 			         struct i915_gem_proto_context *pc,
 			         const struct drm_i915_gem_context_param *args)
 {
-	struct drm_i915_private *i915 = fpriv->dev_priv;
+	struct drm_i915_private *i915 = fpriv->i915;
 	struct set_proto_ctx_engines set = { .i915 = i915 };
 	struct i915_context_param_engines __user *user =
 		u64_to_user_ptr(args->value);
@@ -813,7 +815,7 @@ static int set_proto_ctx_sseu(struct drm_i915_file_private *fpriv,
 			      struct i915_gem_proto_context *pc,
 			      struct drm_i915_gem_context_param *args)
 {
-	struct drm_i915_private *i915 = fpriv->dev_priv;
+	struct drm_i915_private *i915 = fpriv->i915;
 	struct drm_i915_gem_context_param_sseu user_sseu;
 	struct intel_sseu *sseu;
 	int ret;
@@ -844,6 +846,7 @@ static int set_proto_ctx_sseu(struct drm_i915_file_private *fpriv,
 		if (idx >= pc->num_user_engines)
 			return -EINVAL;
 
+		idx = array_index_nospec(idx, pc->num_user_engines);
 		pe = &pc->user_engines[idx];
 
 		/* Only render engine supports RPCS configuration. */
@@ -913,7 +916,7 @@ static int set_proto_ctx_param(struct drm_i915_file_private *fpriv,
 		break;
 
 	case I915_CONTEXT_PARAM_PRIORITY:
-		ret = validate_priority(fpriv->dev_priv, args);
+		ret = validate_priority(fpriv->i915, args);
 		if (!ret)
 			pc->sched.priority = args->value;
 		break;
@@ -934,12 +937,12 @@ static int set_proto_ctx_param(struct drm_i915_file_private *fpriv,
 		if (args->size)
 			ret = -EINVAL;
 		else
-			ret = proto_context_set_persistence(fpriv->dev_priv, pc,
+			ret = proto_context_set_persistence(fpriv->i915, pc,
 							    args->value);
 		break;
 
 	case I915_CONTEXT_PARAM_PROTECTED_CONTENT:
-		ret = proto_context_set_protected(fpriv->dev_priv, pc,
+		ret = proto_context_set_protected(fpriv->i915, pc,
 						  args->value);
 		break;
 
@@ -964,7 +967,11 @@ static int intel_context_set_gem(struct intel_context *ce,
 	RCU_INIT_POINTER(ce->gem_context, ctx);
 
 	GEM_BUG_ON(intel_context_is_pinned(ce));
-	ce->ring_size = SZ_16K;
+
+	if (ce->engine->class == COMPUTE_CLASS)
+		ce->ring_size = SZ_512K;
+	else
+		ce->ring_size = SZ_16K;
 
 	i915_vm_put(ce->vm);
 	ce->vm = i915_gem_context_get_eb_vm(ctx);
@@ -1096,16 +1103,15 @@ static struct i915_gem_engines *alloc_engines(unsigned int count)
 static struct i915_gem_engines *default_engines(struct i915_gem_context *ctx,
 						struct intel_sseu rcs_sseu)
 {
-	const struct intel_gt *gt = to_gt(ctx->i915);
+	const unsigned int max = I915_NUM_ENGINES;
 	struct intel_engine_cs *engine;
 	struct i915_gem_engines *e, *err;
-	enum intel_engine_id id;
 
-	e = alloc_engines(I915_NUM_ENGINES);
+	e = alloc_engines(max);
 	if (!e)
 		return ERR_PTR(-ENOMEM);
 
-	for_each_engine(engine, gt, id) {
+	for_each_uabi_engine(engine, ctx->i915) {
 		struct intel_context *ce;
 		struct intel_sseu sseu = {};
 		int ret;
@@ -1113,7 +1119,7 @@ static struct i915_gem_engines *default_engines(struct i915_gem_context *ctx,
 		if (engine->legacy_idx == INVALID_ENGINE)
 			continue;
 
-		GEM_BUG_ON(engine->legacy_idx >= I915_NUM_ENGINES);
+		GEM_BUG_ON(engine->legacy_idx >= max);
 		GEM_BUG_ON(e->engines[engine->legacy_idx]);
 
 		ce = intel_context_create(engine);
@@ -1618,6 +1624,7 @@ i915_gem_create_context(struct drm_i915_private *i915,
 			err = PTR_ERR(ppgtt);
 			goto err_ctx;
 		}
+		ppgtt->vm.fpriv = pc->fpriv;
 		vm = &ppgtt->vm;
 	}
 	if (vm)
@@ -1737,7 +1744,7 @@ int i915_gem_context_open(struct drm_i915_private *i915,
 	/* 0 reserved for invalid/unassigned ppgtt */
 	xa_init_flags(&file_priv->vm_xa, XA_FLAGS_ALLOC1);
 
-	pc = proto_context_create(i915, 0);
+	pc = proto_context_create(file_priv, i915, 0);
 	if (IS_ERR(pc)) {
 		err = PTR_ERR(pc);
 		goto err;
@@ -1771,7 +1778,7 @@ void i915_gem_context_close(struct drm_file *file)
 	unsigned long idx;
 
 	xa_for_each(&file_priv->proto_context_xa, idx, pc)
-		proto_context_close(file_priv->dev_priv, pc);
+		proto_context_close(file_priv->i915, pc);
 	xa_destroy(&file_priv->proto_context_xa);
 	mutex_destroy(&file_priv->proto_context_lock);
 
@@ -1819,6 +1826,7 @@ int i915_gem_vm_create_ioctl(struct drm_device *dev, void *data,
 
 	GEM_BUG_ON(id == 0); /* reserved for invalid/unassigned ppgtt */
 	args->vm_id = id;
+	ppgtt->vm.fpriv = file_priv;
 	return 0;
 
 err_put:
@@ -1861,11 +1869,19 @@ static int get_ppgtt(struct drm_i915_file_private *file_priv,
 	vm = ctx->vm;
 	GEM_BUG_ON(!vm);
 
-	err = xa_alloc(&file_priv->vm_xa, &id, vm, xa_limit_32b, GFP_KERNEL);
-	if (err)
-		return err;
-
+	/*
+	 * Get a reference for the allocated handle.  Once the handle is
+	 * visible in the vm_xa table, userspace could try to close it
+	 * from under our feet, so we need to hold the extra reference
+	 * first.
+	 */
 	i915_vm_get(vm);
+
+	err = xa_alloc(&file_priv->vm_xa, &id, vm, xa_limit_32b, GFP_KERNEL);
+	if (err) {
+		i915_vm_put(vm);
+		return err;
+	}
 
 	GEM_BUG_ON(id == 0); /* reserved for invalid/unassigned ppgtt */
 	args->value = id;
@@ -2199,7 +2215,7 @@ finalize_create_context_locked(struct drm_i915_file_private *file_priv,
 
 	lockdep_assert_held(&file_priv->proto_context_lock);
 
-	ctx = i915_gem_create_context(file_priv->dev_priv, pc);
+	ctx = i915_gem_create_context(file_priv->i915, pc);
 	if (IS_ERR(ctx))
 		return ctx;
 
@@ -2216,7 +2232,7 @@ finalize_create_context_locked(struct drm_i915_file_private *file_priv,
 
 	old = xa_erase(&file_priv->proto_context_xa, id);
 	GEM_BUG_ON(old != pc);
-	proto_context_close(file_priv->dev_priv, pc);
+	proto_context_close(file_priv->i915, pc);
 
 	return ctx;
 }
@@ -2273,7 +2289,8 @@ int i915_gem_context_create_ioctl(struct drm_device *dev, void *data,
 		return -EIO;
 	}
 
-	ext_data.pc = proto_context_create(i915, args->flags);
+	ext_data.pc = proto_context_create(file->driver_priv, i915,
+					   args->flags);
 	if (IS_ERR(ext_data.pc))
 		return PTR_ERR(ext_data.pc);
 
@@ -2345,7 +2362,7 @@ int i915_gem_context_destroy_ioctl(struct drm_device *dev, void *data,
 	GEM_WARN_ON(ctx && pc);
 
 	if (pc)
-		proto_context_close(file_priv->dev_priv, pc);
+		proto_context_close(file_priv->i915, pc);
 
 	if (ctx)
 		context_close(ctx);
@@ -2498,7 +2515,7 @@ int i915_gem_context_setparam_ioctl(struct drm_device *dev, void *data,
 			 * GEM_CONTEXT_CREATE starting with graphics
 			 * version 13.
 			 */
-			WARN_ON(GRAPHICS_VER(file_priv->dev_priv) > 12);
+			WARN_ON(GRAPHICS_VER(file_priv->i915) > 12);
 			ret = set_proto_ctx_param(file_priv, pc, args);
 		} else {
 			ret = -ENOENT;

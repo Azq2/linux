@@ -264,7 +264,7 @@ xfs_ag_resv_init(
 		if (error)
 			goto out;
 
-		error = xfs_finobt_calc_reserves(mp, tp, pag, &ask, &used);
+		error = xfs_finobt_calc_reserves(pag, tp, &ask, &used);
 		if (error)
 			goto out;
 
@@ -411,6 +411,8 @@ xfs_ag_resv_free_extent(
 		fallthrough;
 	case XFS_AG_RESV_NONE:
 		xfs_trans_mod_sb(tp, XFS_TRANS_SB_FDBLOCKS, (int64_t)len);
+		fallthrough;
+	case XFS_AG_RESV_IGNORE:
 		return;
 	}
 

@@ -29,7 +29,7 @@ static int vfio_fsl_mc_irqs_allocate(struct vfio_fsl_mc_device *vdev)
 
 	irq_count = mc_dev->obj_desc.irq_count;
 
-	mc_irq = kcalloc(irq_count, sizeof(*mc_irq), GFP_KERNEL);
+	mc_irq = kcalloc(irq_count, sizeof(*mc_irq), GFP_KERNEL_ACCOUNT);
 	if (!mc_irq)
 		return -ENOMEM;
 
@@ -54,7 +54,7 @@ static irqreturn_t vfio_fsl_mc_irq_handler(int irq_num, void *arg)
 {
 	struct vfio_fsl_mc_irq *mc_irq = (struct vfio_fsl_mc_irq *)arg;
 
-	eventfd_signal(mc_irq->trigger, 1);
+	eventfd_signal(mc_irq->trigger);
 	return IRQ_HANDLED;
 }
 
@@ -77,7 +77,7 @@ static int vfio_set_trigger(struct vfio_fsl_mc_device *vdev,
 	if (fd < 0) /* Disable only */
 		return 0;
 
-	irq->name = kasprintf(GFP_KERNEL, "vfio-irq[%d](%s)",
+	irq->name = kasprintf(GFP_KERNEL_ACCOUNT, "vfio-irq[%d](%s)",
 			    hwirq, dev_name(&vdev->mc_dev->dev));
 	if (!irq->name)
 		return -ENOMEM;

@@ -21,6 +21,7 @@
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/coredump.h>
+#include <linux/sched/cputime.h>
 #include <linux/rwsem.h>
 #include <linux/pagemap.h>
 #include <linux/rmap.h>
@@ -45,6 +46,9 @@
 #include "internal.h"
 #include "mm_slot.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/ksm.h>
+
 #ifdef CONFIG_NUMA
 #define NUMA(x)		(x)
 #define DO_NUMA(x)	do { (x); } while (0)
@@ -52,6 +56,8 @@
 #define NUMA(x)		(0)
 #define DO_NUMA(x)	do { } while (0)
 #endif
+
+typedef u8 rmap_age_t;
 
 /**
  * DOC: Overview
@@ -190,6 +196,8 @@ struct ksm_stable_node {
  * @node: rb node of this rmap_item in the unstable tree
  * @head: pointer to stable_node heading this list in the stable tree
  * @hlist: link into hlist of rmap_items hanging off that stable_node
+ * @age: number of scan iterations since creation
+ * @remaining_skips: how many scans to skip
  */
 struct ksm_rmap_item {
 	struct ksm_rmap_item *rmap_list;
@@ -202,6 +210,8 @@ struct ksm_rmap_item {
 	struct mm_struct *mm;
 	unsigned long address;		/* + low bits used for flags below */
 	unsigned int oldchecksum;	/* when unstable */
+	rmap_age_t age;
+	rmap_age_t remaining_skips;
 	union {
 		struct rb_node node;	/* when node of unstable tree */
 		struct {		/* when listed from stable tree */
@@ -239,6 +249,12 @@ static struct kmem_cache *rmap_item_cache;
 static struct kmem_cache *stable_node_cache;
 static struct kmem_cache *mm_slot_cache;
 
+/* Default number of pages to scan per batch */
+#define DEFAULT_PAGES_TO_SCAN 100
+
+/* The number of pages scanned */
+static unsigned long ksm_pages_scanned;
+
 /* The number of nodes in the stable tree */
 static unsigned long ksm_pages_shared;
 
@@ -264,7 +280,7 @@ static unsigned int ksm_stable_node_chains_prune_millisecs = 2000;
 static int ksm_max_page_sharing = 256;
 
 /* Number of pages ksmd should scan in one batch */
-static unsigned int ksm_thread_pages_to_scan = 100;
+static unsigned int ksm_thread_pages_to_scan = DEFAULT_PAGES_TO_SCAN;
 
 /* Milliseconds ksmd should sleep between batches */
 static unsigned int ksm_thread_sleep_millisecs = 20;
@@ -274,6 +290,182 @@ static unsigned int zero_checksum __read_mostly;
 
 /* Whether to merge empty (zeroed) pages with actual zero pages */
 static bool ksm_use_zero_pages __read_mostly;
+
+/* Skip pages that couldn't be de-duplicated previously */
+/* Default to true at least temporarily, for testing */
+static bool ksm_smart_scan = true;
+
+/* The number of zero pages which is placed by KSM */
+unsigned long ksm_zero_pages;
+
+/* The number of pages that have been skipped due to "smart scanning" */
+static unsigned long ksm_pages_skipped;
+
+/* Don't scan more than max pages per batch. */
+static unsigned long ksm_advisor_max_pages_to_scan = 30000;
+
+/* Min CPU for scanning pages per scan */
+#define KSM_ADVISOR_MIN_CPU 10
+
+/* Max CPU for scanning pages per scan */
+static unsigned int ksm_advisor_max_cpu =  70;
+
+/* Target scan time in seconds to analyze all KSM candidate pages. */
+static unsigned long ksm_advisor_target_scan_time = 200;
+
+/* Exponentially weighted moving average. */
+#define EWMA_WEIGHT 30
+
+/**
+ * struct advisor_ctx - metadata for KSM advisor
+ * @start_scan: start time of the current scan
+ * @scan_time: scan time of previous scan
+ * @change: change in percent to pages_to_scan parameter
+ * @cpu_time: cpu time consumed by the ksmd thread in the previous scan
+ */
+struct advisor_ctx {
+	ktime_t start_scan;
+	unsigned long scan_time;
+	unsigned long change;
+	unsigned long long cpu_time;
+};
+static struct advisor_ctx advisor_ctx;
+
+/* Define different advisor's */
+enum ksm_advisor_type {
+	KSM_ADVISOR_NONE,
+	KSM_ADVISOR_SCAN_TIME,
+};
+static enum ksm_advisor_type ksm_advisor;
+
+#ifdef CONFIG_SYSFS
+/*
+ * Only called through the sysfs control interface:
+ */
+
+/* At least scan this many pages per batch. */
+static unsigned long ksm_advisor_min_pages_to_scan = 500;
+
+static void set_advisor_defaults(void)
+{
+	if (ksm_advisor == KSM_ADVISOR_NONE) {
+		ksm_thread_pages_to_scan = DEFAULT_PAGES_TO_SCAN;
+	} else if (ksm_advisor == KSM_ADVISOR_SCAN_TIME) {
+		advisor_ctx = (const struct advisor_ctx){ 0 };
+		ksm_thread_pages_to_scan = ksm_advisor_min_pages_to_scan;
+	}
+}
+#endif /* CONFIG_SYSFS */
+
+static inline void advisor_start_scan(void)
+{
+	if (ksm_advisor == KSM_ADVISOR_SCAN_TIME)
+		advisor_ctx.start_scan = ktime_get();
+}
+
+/*
+ * Use previous scan time if available, otherwise use current scan time as an
+ * approximation for the previous scan time.
+ */
+static inline unsigned long prev_scan_time(struct advisor_ctx *ctx,
+					   unsigned long scan_time)
+{
+	return ctx->scan_time ? ctx->scan_time : scan_time;
+}
+
+/* Calculate exponential weighted moving average */
+static unsigned long ewma(unsigned long prev, unsigned long curr)
+{
+	return ((100 - EWMA_WEIGHT) * prev + EWMA_WEIGHT * curr) / 100;
+}
+
+/*
+ * The scan time advisor is based on the current scan rate and the target
+ * scan rate.
+ *
+ *      new_pages_to_scan = pages_to_scan * (scan_time / target_scan_time)
+ *
+ * To avoid perturbations it calculates a change factor of previous changes.
+ * A new change factor is calculated for each iteration and it uses an
+ * exponentially weighted moving average. The new pages_to_scan value is
+ * multiplied with that change factor:
+ *
+ *      new_pages_to_scan *= change facor
+ *
+ * The new_pages_to_scan value is limited by the cpu min and max values. It
+ * calculates the cpu percent for the last scan and calculates the new
+ * estimated cpu percent cost for the next scan. That value is capped by the
+ * cpu min and max setting.
+ *
+ * In addition the new pages_to_scan value is capped by the max and min
+ * limits.
+ */
+static void scan_time_advisor(void)
+{
+	unsigned int cpu_percent;
+	unsigned long cpu_time;
+	unsigned long cpu_time_diff;
+	unsigned long cpu_time_diff_ms;
+	unsigned long pages;
+	unsigned long per_page_cost;
+	unsigned long factor;
+	unsigned long change;
+	unsigned long last_scan_time;
+	unsigned long scan_time;
+
+	/* Convert scan time to seconds */
+	scan_time = div_s64(ktime_ms_delta(ktime_get(), advisor_ctx.start_scan),
+			    MSEC_PER_SEC);
+	scan_time = scan_time ? scan_time : 1;
+
+	/* Calculate CPU consumption of ksmd background thread */
+	cpu_time = task_sched_runtime(current);
+	cpu_time_diff = cpu_time - advisor_ctx.cpu_time;
+	cpu_time_diff_ms = cpu_time_diff / 1000 / 1000;
+
+	cpu_percent = (cpu_time_diff_ms * 100) / (scan_time * 1000);
+	cpu_percent = cpu_percent ? cpu_percent : 1;
+	last_scan_time = prev_scan_time(&advisor_ctx, scan_time);
+
+	/* Calculate scan time as percentage of target scan time */
+	factor = ksm_advisor_target_scan_time * 100 / scan_time;
+	factor = factor ? factor : 1;
+
+	/*
+	 * Calculate scan time as percentage of last scan time and use
+	 * exponentially weighted average to smooth it
+	 */
+	change = scan_time * 100 / last_scan_time;
+	change = change ? change : 1;
+	change = ewma(advisor_ctx.change, change);
+
+	/* Calculate new scan rate based on target scan rate. */
+	pages = ksm_thread_pages_to_scan * 100 / factor;
+	/* Update pages_to_scan by weighted change percentage. */
+	pages = pages * change / 100;
+
+	/* Cap new pages_to_scan value */
+	per_page_cost = ksm_thread_pages_to_scan / cpu_percent;
+	per_page_cost = per_page_cost ? per_page_cost : 1;
+
+	pages = min(pages, per_page_cost * ksm_advisor_max_cpu);
+	pages = max(pages, per_page_cost * KSM_ADVISOR_MIN_CPU);
+	pages = min(pages, ksm_advisor_max_pages_to_scan);
+
+	/* Update advisor context */
+	advisor_ctx.change = change;
+	advisor_ctx.scan_time = scan_time;
+	advisor_ctx.cpu_time = cpu_time;
+
+	ksm_thread_pages_to_scan = pages;
+	trace_ksm_advisor(scan_time, pages, cpu_percent);
+}
+
+static void advisor_stop_scan(void)
+{
+	if (ksm_advisor == KSM_ADVISOR_SCAN_TIME)
+		scan_time_advisor();
+}
 
 #ifdef CONFIG_NUMA
 /* Zeroed when merging across nodes is not allowed */
@@ -426,16 +618,17 @@ static int break_ksm_pmd_entry(pmd_t *pmd, unsigned long addr, unsigned long nex
 	struct page *page = NULL;
 	spinlock_t *ptl;
 	pte_t *pte;
+	pte_t ptent;
 	int ret;
 
-	if (pmd_leaf(*pmd) || !pmd_present(*pmd))
-		return 0;
-
 	pte = pte_offset_map_lock(walk->mm, pmd, addr, &ptl);
-	if (pte_present(*pte)) {
-		page = vm_normal_page(walk->vma, addr, *pte);
-	} else if (!pte_none(*pte)) {
-		swp_entry_t entry = pte_to_swp_entry(*pte);
+	if (!pte)
+		return 0;
+	ptent = ptep_get(pte);
+	if (pte_present(ptent)) {
+		page = vm_normal_page(walk->vma, addr, ptent);
+	} else if (!pte_none(ptent)) {
+		swp_entry_t entry = pte_to_swp_entry(ptent);
 
 		/*
 		 * As KSM pages remain KSM pages until freed, no need to wait
@@ -444,13 +637,20 @@ static int break_ksm_pmd_entry(pmd_t *pmd, unsigned long addr, unsigned long nex
 		if (is_migration_entry(entry))
 			page = pfn_swap_entry_to_page(entry);
 	}
-	ret = page && PageKsm(page);
+	/* return 1 if the page is an normal ksm page or KSM-placed zero page */
+	ret = (page && PageKsm(page)) || is_ksm_zero_pte(ptent);
 	pte_unmap_unlock(pte, ptl);
 	return ret;
 }
 
 static const struct mm_walk_ops break_ksm_ops = {
 	.pmd_entry = break_ksm_pmd_entry,
+	.walk_lock = PGWALK_RDLOCK,
+};
+
+static const struct mm_walk_ops break_ksm_lock_vma_ops = {
+	.pmd_entry = break_ksm_pmd_entry,
+	.walk_lock = PGWALK_WRLOCK,
 };
 
 /*
@@ -466,16 +666,17 @@ static const struct mm_walk_ops break_ksm_ops = {
  * of the process that owns 'vma'.  We also do not want to enforce
  * protection keys here anyway.
  */
-static int break_ksm(struct vm_area_struct *vma, unsigned long addr)
+static int break_ksm(struct vm_area_struct *vma, unsigned long addr, bool lock_vma)
 {
 	vm_fault_t ret = 0;
+	const struct mm_walk_ops *ops = lock_vma ?
+				&break_ksm_lock_vma_ops : &break_ksm_ops;
 
 	do {
 		int ksm_page;
 
 		cond_resched();
-		ksm_page = walk_page_range_vma(vma, addr, addr + 1,
-					       &break_ksm_ops, NULL);
+		ksm_page = walk_page_range_vma(vma, addr, addr + 1, ops, NULL);
 		if (WARN_ON_ONCE(ksm_page < 0))
 			return ksm_page;
 		if (!ksm_page)
@@ -512,6 +713,28 @@ static int break_ksm(struct vm_area_struct *vma, unsigned long addr)
 	return (ret & VM_FAULT_OOM) ? -ENOMEM : 0;
 }
 
+static bool vma_ksm_compatible(struct vm_area_struct *vma)
+{
+	if (vma->vm_flags & (VM_SHARED  | VM_MAYSHARE   | VM_PFNMAP  |
+			     VM_IO      | VM_DONTEXPAND | VM_HUGETLB |
+			     VM_MIXEDMAP))
+		return false;		/* just ignore the advice */
+
+	if (vma_is_dax(vma))
+		return false;
+
+#ifdef VM_SAO
+	if (vma->vm_flags & VM_SAO)
+		return false;
+#endif
+#ifdef VM_SPARC_ADI
+	if (vma->vm_flags & VM_SPARC_ADI)
+		return false;
+#endif
+
+	return true;
+}
+
 static struct vm_area_struct *find_mergeable_vma(struct mm_struct *mm,
 		unsigned long addr)
 {
@@ -539,7 +762,7 @@ static void break_cow(struct ksm_rmap_item *rmap_item)
 	mmap_read_lock(mm);
 	vma = find_mergeable_vma(mm, addr);
 	if (vma)
-		break_ksm(vma, addr);
+		break_ksm(vma, addr, false);
 	mmap_read_unlock(mm);
 }
 
@@ -633,10 +856,12 @@ static void remove_node_from_stable_tree(struct ksm_stable_node *stable_node)
 	BUG_ON(stable_node->rmap_hlist_len < 0);
 
 	hlist_for_each_entry(rmap_item, &stable_node->hlist, hlist) {
-		if (rmap_item->hlist.next)
+		if (rmap_item->hlist.next) {
 			ksm_pages_sharing--;
-		else
+			trace_ksm_remove_rmap_item(stable_node->kpfn, rmap_item, rmap_item->mm);
+		} else {
 			ksm_pages_shared--;
+		}
 
 		rmap_item->mm->ksm_merging_pages--;
 
@@ -657,6 +882,7 @@ static void remove_node_from_stable_tree(struct ksm_stable_node *stable_node)
 	BUILD_BUG_ON(STABLE_NODE_DUP_HEAD <= &migrate_nodes);
 	BUILD_BUG_ON(STABLE_NODE_DUP_HEAD >= &migrate_nodes + 1);
 
+	trace_ksm_remove_ksm_page(stable_node->kpfn);
 	if (stable_node->head == &migrate_nodes)
 		list_del(&stable_node->list);
 	else
@@ -842,7 +1068,7 @@ static void remove_trailing_rmap_items(struct ksm_rmap_item **rmap_list)
  * in cmp_and_merge_page on one of the rmap_items we would be removing.
  */
 static int unmerge_ksm_pages(struct vm_area_struct *vma,
-			     unsigned long start, unsigned long end)
+			     unsigned long start, unsigned long end, bool lock_vma)
 {
 	unsigned long addr;
 	int err = 0;
@@ -853,7 +1079,7 @@ static int unmerge_ksm_pages(struct vm_area_struct *vma,
 		if (signal_pending(current))
 			err = -ERESTARTSYS;
 		else
-			err = break_ksm(vma, addr);
+			err = break_ksm(vma, addr, lock_vma);
 	}
 	return err;
 }
@@ -903,7 +1129,7 @@ static int remove_stable_node(struct ksm_stable_node *stable_node)
 		 * The stable node did not yet appear stale to get_ksm_page(),
 		 * since that allows for an unmapped ksm page to be recognized
 		 * right up until it is freed; but the node is safe to remove.
-		 * This page might be in a pagevec waiting to be freed,
+		 * This page might be in an LRU cache waiting to be freed,
 		 * or it might be PageSwapCache (perhaps under writeback),
 		 * or it might have been removed from swapcache a moment ago.
 		 */
@@ -988,17 +1214,24 @@ static int unmerge_and_remove_all_rmap_items(void)
 
 		mm = mm_slot->slot.mm;
 		mmap_read_lock(mm);
+
+		/*
+		 * Exit right away if mm is exiting to avoid lockdep issue in
+		 * the maple tree
+		 */
+		if (ksm_test_exit(mm))
+			goto mm_exiting;
+
 		for_each_vma(vmi, vma) {
-			if (ksm_test_exit(mm))
-				break;
 			if (!(vma->vm_flags & VM_MERGEABLE) || !vma->anon_vma)
 				continue;
 			err = unmerge_ksm_pages(vma,
-						vma->vm_start, vma->vm_end);
+						vma->vm_start, vma->vm_end, false);
 			if (err)
 				goto error;
 		}
 
+mm_exiting:
 		remove_trailing_rmap_items(&mm_slot->rmap_list);
 		mmap_read_unlock(mm);
 
@@ -1013,6 +1246,7 @@ static int unmerge_and_remove_all_rmap_items(void)
 
 			mm_slot_free(mm_slot_cache, mm_slot);
 			clear_bit(MMF_VM_MERGEABLE, &mm->flags);
+			clear_bit(MMF_VM_MERGE_ANY, &mm->flags);
 			mmdrop(mm);
 		} else
 			spin_unlock(&ksm_mmlist_lock);
@@ -1035,9 +1269,9 @@ error:
 static u32 calc_checksum(struct page *page)
 {
 	u32 checksum;
-	void *addr = kmap_atomic(page);
+	void *addr = kmap_local_page(page);
 	checksum = xxhash(addr, PAGE_SIZE, 0);
-	kunmap_atomic(addr);
+	kunmap_local(addr);
 	return checksum;
 }
 
@@ -1050,6 +1284,7 @@ static int write_protect_page(struct vm_area_struct *vma, struct page *page,
 	int err = -EFAULT;
 	struct mmu_notifier_range range;
 	bool anon_exclusive;
+	pte_t entry;
 
 	pvmw.address = page_address_in_vma(page, vma);
 	if (pvmw.address == -EFAULT)
@@ -1057,8 +1292,7 @@ static int write_protect_page(struct vm_area_struct *vma, struct page *page,
 
 	BUG_ON(PageTransCompound(page));
 
-	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, mm,
-				pvmw.address,
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, mm, pvmw.address,
 				pvmw.address + PAGE_SIZE);
 	mmu_notifier_invalidate_range_start(&range);
 
@@ -1068,10 +1302,9 @@ static int write_protect_page(struct vm_area_struct *vma, struct page *page,
 		goto out_unlock;
 
 	anon_exclusive = PageAnonExclusive(page);
-	if (pte_write(*pvmw.pte) || pte_dirty(*pvmw.pte) ||
+	entry = ptep_get(pvmw.pte);
+	if (pte_write(entry) || pte_dirty(entry) ||
 	    anon_exclusive || mm_tlb_flush_pending(mm)) {
-		pte_t entry;
-
 		swapped = PageSwapCache(page);
 		flush_cache_page(vma, pvmw.address, page_to_pfn(page));
 		/*
@@ -1098,8 +1331,9 @@ static int write_protect_page(struct vm_area_struct *vma, struct page *page,
 			goto out_unlock;
 		}
 
-		/* See page_try_share_anon_rmap(): clear PTE first. */
-		if (anon_exclusive && page_try_share_anon_rmap(page)) {
+		/* See folio_try_share_anon_rmap_pte(): clear PTE first. */
+		if (anon_exclusive &&
+		    folio_try_share_anon_rmap_pte(page_folio(page), page)) {
 			set_pte_at(mm, pvmw.address, pvmw.pte, entry);
 			goto out_unlock;
 		}
@@ -1113,7 +1347,7 @@ static int write_protect_page(struct vm_area_struct *vma, struct page *page,
 
 		set_pte_at_notify(mm, pvmw.address, pvmw.pte, entry);
 	}
-	*orig_pte = *pvmw.pte;
+	*orig_pte = entry;
 	err = 0;
 
 out_unlock:
@@ -1136,6 +1370,7 @@ out:
 static int replace_page(struct vm_area_struct *vma, struct page *page,
 			struct page *kpage, pte_t orig_pte)
 {
+	struct folio *kfolio = page_folio(kpage);
 	struct mm_struct *mm = vma->vm_mm;
 	struct folio *folio;
 	pmd_t *pmd;
@@ -1159,34 +1394,42 @@ static int replace_page(struct vm_area_struct *vma, struct page *page,
 	 * without holding anon_vma lock for write.  So when looking for a
 	 * genuine pmde (in which to find pte), test present and !THP together.
 	 */
-	pmde = *pmd;
-	barrier();
+	pmde = pmdp_get_lockless(pmd);
 	if (!pmd_present(pmde) || pmd_trans_huge(pmde))
 		goto out;
 
-	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, mm, addr,
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, mm, addr,
 				addr + PAGE_SIZE);
 	mmu_notifier_invalidate_range_start(&range);
 
 	ptep = pte_offset_map_lock(mm, pmd, addr, &ptl);
-	if (!pte_same(*ptep, orig_pte)) {
+	if (!ptep)
+		goto out_mn;
+	if (!pte_same(ptep_get(ptep), orig_pte)) {
 		pte_unmap_unlock(ptep, ptl);
 		goto out_mn;
 	}
 	VM_BUG_ON_PAGE(PageAnonExclusive(page), page);
-	VM_BUG_ON_PAGE(PageAnon(kpage) && PageAnonExclusive(kpage), kpage);
+	VM_BUG_ON_FOLIO(folio_test_anon(kfolio) && PageAnonExclusive(kpage),
+			kfolio);
 
 	/*
 	 * No need to check ksm_use_zero_pages here: we can only have a
 	 * zero_page here if ksm_use_zero_pages was enabled already.
 	 */
 	if (!is_zero_pfn(page_to_pfn(kpage))) {
-		get_page(kpage);
-		page_add_anon_rmap(kpage, vma, addr, RMAP_NONE);
+		folio_get(kfolio);
+		folio_add_anon_rmap_pte(kfolio, kpage, vma, addr, RMAP_NONE);
 		newpte = mk_pte(kpage, vma->vm_page_prot);
 	} else {
-		newpte = pte_mkspecial(pfn_pte(page_to_pfn(kpage),
-					       vma->vm_page_prot));
+		/*
+		 * Use pte_mkdirty to mark the zero page mapped by KSM, and then
+		 * we can easily track all KSM-placed zero pages by checking if
+		 * the dirty bit in zero page's PTE is set.
+		 */
+		newpte = pte_mkdirty(pte_mkspecial(pfn_pte(page_to_pfn(kpage), vma->vm_page_prot)));
+		ksm_zero_pages++;
+		mm->ksm_zero_pages++;
 		/*
 		 * We're replacing an anonymous page with a zero page, which is
 		 * not anonymous. We need to do proper accounting otherwise we
@@ -1196,7 +1439,7 @@ static int replace_page(struct vm_area_struct *vma, struct page *page,
 		dec_mm_counter(mm, MM_ANONPAGES);
 	}
 
-	flush_cache_page(vma, addr, pte_pfn(*ptep));
+	flush_cache_page(vma, addr, pte_pfn(ptep_get(ptep)));
 	/*
 	 * No need to notify as we are replacing a read only page with another
 	 * read only page with the same content.
@@ -1207,7 +1450,7 @@ static int replace_page(struct vm_area_struct *vma, struct page *page,
 	set_pte_at_notify(mm, addr, ptep, newpte);
 
 	folio = page_folio(page);
-	page_remove_rmap(page, vma, false);
+	folio_remove_rmap_pte(folio, page, vma);
 	if (!folio_mapped(folio))
 		folio_free_swap(folio);
 	folio_put(folio);
@@ -1318,6 +1561,8 @@ static int try_to_merge_with_ksm_page(struct ksm_rmap_item *rmap_item,
 	get_anon_vma(vma->anon_vma);
 out:
 	mmap_read_unlock(mm);
+	trace_ksm_merge_with_ksm_page(kpage, page_to_pfn(kpage ? kpage : page),
+				rmap_item, mm, err);
 	return err;
 }
 
@@ -2136,6 +2381,9 @@ static void cmp_and_merge_page(struct page *page, struct ksm_rmap_item *rmap_ite
 		if (vma) {
 			err = try_to_merge_one_page(vma, page,
 					ZERO_PAGE(rmap_item->address));
+			trace_ksm_merge_one_page(
+				page_to_pfn(ZERO_PAGE(rmap_item->address)),
+				rmap_item, mm, err);
 		} else {
 			/*
 			 * If the vma is out of date, we do not need to
@@ -2243,6 +2491,74 @@ static struct ksm_rmap_item *get_next_rmap_item(struct ksm_mm_slot *mm_slot,
 	return rmap_item;
 }
 
+/*
+ * Calculate skip age for the ksm page age. The age determines how often
+ * de-duplicating has already been tried unsuccessfully. If the age is
+ * smaller, the scanning of this page is skipped for less scans.
+ *
+ * @age: rmap_item age of page
+ */
+static unsigned int skip_age(rmap_age_t age)
+{
+	if (age <= 3)
+		return 1;
+	if (age <= 5)
+		return 2;
+	if (age <= 8)
+		return 4;
+
+	return 8;
+}
+
+/*
+ * Determines if a page should be skipped for the current scan.
+ *
+ * @page: page to check
+ * @rmap_item: associated rmap_item of page
+ */
+static bool should_skip_rmap_item(struct page *page,
+				  struct ksm_rmap_item *rmap_item)
+{
+	rmap_age_t age;
+
+	if (!ksm_smart_scan)
+		return false;
+
+	/*
+	 * Never skip pages that are already KSM; pages cmp_and_merge_page()
+	 * will essentially ignore them, but we still have to process them
+	 * properly.
+	 */
+	if (PageKsm(page))
+		return false;
+
+	age = rmap_item->age;
+	if (age != U8_MAX)
+		rmap_item->age++;
+
+	/*
+	 * Smaller ages are not skipped, they need to get a chance to go
+	 * through the different phases of the KSM merging.
+	 */
+	if (age < 3)
+		return false;
+
+	/*
+	 * Are we still allowed to skip? If not, then don't skip it
+	 * and determine how much more often we are allowed to skip next.
+	 */
+	if (!rmap_item->remaining_skips) {
+		rmap_item->remaining_skips = skip_age(age);
+		return false;
+	}
+
+	/* Skip this page */
+	ksm_pages_skipped++;
+	rmap_item->remaining_skips--;
+	remove_rmap_item_from_tree(rmap_item);
+	return true;
+}
+
 static struct ksm_rmap_item *scan_get_next_rmap_item(struct page **page)
 {
 	struct mm_struct *mm;
@@ -2258,9 +2574,12 @@ static struct ksm_rmap_item *scan_get_next_rmap_item(struct page **page)
 
 	mm_slot = ksm_scan.mm_slot;
 	if (mm_slot == &ksm_mm_head) {
+		advisor_start_scan();
+		trace_ksm_start_scan(ksm_scan.seqnr, ksm_rmap_items);
+
 		/*
-		 * A number of pages can hang around indefinitely on per-cpu
-		 * pagevecs, raised page count preventing write_protect_page
+		 * A number of pages can hang around indefinitely in per-cpu
+		 * LRU cache, raised page count preventing write_protect_page
 		 * from merging them.  Though it doesn't really matter much,
 		 * it is puzzling to see some stuck in pages_volatile until
 		 * other activity jostles them out, and they also prevented
@@ -2345,6 +2664,10 @@ next_mm:
 				if (rmap_item) {
 					ksm_scan.rmap_list =
 							&rmap_item->rmap_list;
+
+					if (should_skip_rmap_item(*page, rmap_item))
+						goto next_page;
+
 					ksm_scan.address += PAGE_SIZE;
 				} else
 					put_page(*page);
@@ -2389,6 +2712,7 @@ no_vmas:
 
 		mm_slot_free(mm_slot_cache, mm_slot);
 		clear_bit(MMF_VM_MERGEABLE, &mm->flags);
+		clear_bit(MMF_VM_MERGE_ANY, &mm->flags);
 		mmap_read_unlock(mm);
 		mmdrop(mm);
 	} else {
@@ -2408,6 +2732,9 @@ no_vmas:
 	if (mm_slot != &ksm_mm_head)
 		goto next_mm;
 
+	advisor_stop_scan();
+
+	trace_ksm_stop_scan(ksm_scan.seqnr, ksm_rmap_items);
 	ksm_scan.seqnr++;
 	return NULL;
 }
@@ -2420,8 +2747,9 @@ static void ksm_do_scan(unsigned int scan_npages)
 {
 	struct ksm_rmap_item *rmap_item;
 	struct page *page;
+	unsigned int npages = scan_npages;
 
-	while (scan_npages-- && likely(!freezing(current))) {
+	while (npages-- && likely(!freezing(current))) {
 		cond_resched();
 		rmap_item = scan_get_next_rmap_item(&page);
 		if (!rmap_item)
@@ -2429,6 +2757,8 @@ static void ksm_do_scan(unsigned int scan_npages)
 		cmp_and_merge_page(page, rmap_item);
 		put_page(page);
 	}
+
+	ksm_pages_scanned += scan_npages - npages;
 }
 
 static int ksmd_should_run(void)
@@ -2450,11 +2780,9 @@ static int ksm_scan_thread(void *nothing)
 			ksm_do_scan(ksm_thread_pages_to_scan);
 		mutex_unlock(&ksm_thread_mutex);
 
-		try_to_freeze();
-
 		if (ksmd_should_run()) {
 			sleep_ms = READ_ONCE(ksm_thread_sleep_millisecs);
-			wait_event_interruptible_timeout(ksm_iter_wait,
+			wait_event_freezable_timeout(ksm_iter_wait,
 				sleep_ms != READ_ONCE(ksm_thread_sleep_millisecs),
 				msecs_to_jiffies(sleep_ms));
 		} else {
@@ -2465,6 +2793,136 @@ static int ksm_scan_thread(void *nothing)
 	return 0;
 }
 
+static void __ksm_add_vma(struct vm_area_struct *vma)
+{
+	unsigned long vm_flags = vma->vm_flags;
+
+	if (vm_flags & VM_MERGEABLE)
+		return;
+
+	if (vma_ksm_compatible(vma))
+		vm_flags_set(vma, VM_MERGEABLE);
+}
+
+static int __ksm_del_vma(struct vm_area_struct *vma)
+{
+	int err;
+
+	if (!(vma->vm_flags & VM_MERGEABLE))
+		return 0;
+
+	if (vma->anon_vma) {
+		err = unmerge_ksm_pages(vma, vma->vm_start, vma->vm_end, true);
+		if (err)
+			return err;
+	}
+
+	vm_flags_clear(vma, VM_MERGEABLE);
+	return 0;
+}
+/**
+ * ksm_add_vma - Mark vma as mergeable if compatible
+ *
+ * @vma:  Pointer to vma
+ */
+void ksm_add_vma(struct vm_area_struct *vma)
+{
+	struct mm_struct *mm = vma->vm_mm;
+
+	if (test_bit(MMF_VM_MERGE_ANY, &mm->flags))
+		__ksm_add_vma(vma);
+}
+
+static void ksm_add_vmas(struct mm_struct *mm)
+{
+	struct vm_area_struct *vma;
+
+	VMA_ITERATOR(vmi, mm, 0);
+	for_each_vma(vmi, vma)
+		__ksm_add_vma(vma);
+}
+
+static int ksm_del_vmas(struct mm_struct *mm)
+{
+	struct vm_area_struct *vma;
+	int err;
+
+	VMA_ITERATOR(vmi, mm, 0);
+	for_each_vma(vmi, vma) {
+		err = __ksm_del_vma(vma);
+		if (err)
+			return err;
+	}
+	return 0;
+}
+
+/**
+ * ksm_enable_merge_any - Add mm to mm ksm list and enable merging on all
+ *                        compatible VMA's
+ *
+ * @mm:  Pointer to mm
+ *
+ * Returns 0 on success, otherwise error code
+ */
+int ksm_enable_merge_any(struct mm_struct *mm)
+{
+	int err;
+
+	if (test_bit(MMF_VM_MERGE_ANY, &mm->flags))
+		return 0;
+
+	if (!test_bit(MMF_VM_MERGEABLE, &mm->flags)) {
+		err = __ksm_enter(mm);
+		if (err)
+			return err;
+	}
+
+	set_bit(MMF_VM_MERGE_ANY, &mm->flags);
+	ksm_add_vmas(mm);
+
+	return 0;
+}
+
+/**
+ * ksm_disable_merge_any - Disable merging on all compatible VMA's of the mm,
+ *			   previously enabled via ksm_enable_merge_any().
+ *
+ * Disabling merging implies unmerging any merged pages, like setting
+ * MADV_UNMERGEABLE would. If unmerging fails, the whole operation fails and
+ * merging on all compatible VMA's remains enabled.
+ *
+ * @mm: Pointer to mm
+ *
+ * Returns 0 on success, otherwise error code
+ */
+int ksm_disable_merge_any(struct mm_struct *mm)
+{
+	int err;
+
+	if (!test_bit(MMF_VM_MERGE_ANY, &mm->flags))
+		return 0;
+
+	err = ksm_del_vmas(mm);
+	if (err) {
+		ksm_add_vmas(mm);
+		return err;
+	}
+
+	clear_bit(MMF_VM_MERGE_ANY, &mm->flags);
+	return 0;
+}
+
+int ksm_disable(struct mm_struct *mm)
+{
+	mmap_assert_write_locked(mm);
+
+	if (!test_bit(MMF_VM_MERGEABLE, &mm->flags))
+		return 0;
+	if (test_bit(MMF_VM_MERGE_ANY, &mm->flags))
+		return ksm_disable_merge_any(mm);
+	return ksm_del_vmas(mm);
+}
+
 int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 		unsigned long end, int advice, unsigned long *vm_flags)
 {
@@ -2473,25 +2931,10 @@ int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 
 	switch (advice) {
 	case MADV_MERGEABLE:
-		/*
-		 * Be somewhat over-protective for now!
-		 */
-		if (*vm_flags & (VM_MERGEABLE | VM_SHARED  | VM_MAYSHARE   |
-				 VM_PFNMAP    | VM_IO      | VM_DONTEXPAND |
-				 VM_HUGETLB | VM_MIXEDMAP))
-			return 0;		/* just ignore the advice */
-
-		if (vma_is_dax(vma))
+		if (vma->vm_flags & VM_MERGEABLE)
 			return 0;
-
-#ifdef VM_SAO
-		if (*vm_flags & VM_SAO)
+		if (!vma_ksm_compatible(vma))
 			return 0;
-#endif
-#ifdef VM_SPARC_ADI
-		if (*vm_flags & VM_SPARC_ADI)
-			return 0;
-#endif
 
 		if (!test_bit(MMF_VM_MERGEABLE, &mm->flags)) {
 			err = __ksm_enter(mm);
@@ -2507,7 +2950,7 @@ int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 			return 0;		/* just ignore the advice */
 
 		if (vma->anon_vma) {
-			err = unmerge_ksm_pages(vma, start, end);
+			err = unmerge_ksm_pages(vma, start, end, true);
 			if (err)
 				return err;
 		}
@@ -2559,6 +3002,7 @@ int __ksm_enter(struct mm_struct *mm)
 	if (needs_wakeup)
 		wake_up_interruptible(&ksm_thread_wait);
 
+	trace_ksm_enter(mm);
 	return 0;
 }
 
@@ -2594,52 +3038,64 @@ void __ksm_exit(struct mm_struct *mm)
 
 	if (easy_to_free) {
 		mm_slot_free(mm_slot_cache, mm_slot);
+		clear_bit(MMF_VM_MERGE_ANY, &mm->flags);
 		clear_bit(MMF_VM_MERGEABLE, &mm->flags);
 		mmdrop(mm);
 	} else if (mm_slot) {
 		mmap_write_lock(mm);
 		mmap_write_unlock(mm);
 	}
+
+	trace_ksm_exit(mm);
 }
 
-struct page *ksm_might_need_to_copy(struct page *page,
-			struct vm_area_struct *vma, unsigned long address)
+struct folio *ksm_might_need_to_copy(struct folio *folio,
+			struct vm_area_struct *vma, unsigned long addr)
 {
-	struct folio *folio = page_folio(page);
+	struct page *page = folio_page(folio, 0);
 	struct anon_vma *anon_vma = folio_anon_vma(folio);
-	struct page *new_page;
+	struct folio *new_folio;
 
-	if (PageKsm(page)) {
-		if (page_stable_node(page) &&
+	if (folio_test_large(folio))
+		return folio;
+
+	if (folio_test_ksm(folio)) {
+		if (folio_stable_node(folio) &&
 		    !(ksm_run & KSM_RUN_UNMERGE))
-			return page;	/* no need to copy it */
+			return folio;	/* no need to copy it */
 	} else if (!anon_vma) {
-		return page;		/* no need to copy it */
-	} else if (page->index == linear_page_index(vma, address) &&
+		return folio;		/* no need to copy it */
+	} else if (folio->index == linear_page_index(vma, addr) &&
 			anon_vma->root == vma->anon_vma->root) {
-		return page;		/* still no need to copy it */
+		return folio;		/* still no need to copy it */
 	}
-	if (!PageUptodate(page))
-		return page;		/* let do_swap_page report the error */
+	if (PageHWPoison(page))
+		return ERR_PTR(-EHWPOISON);
+	if (!folio_test_uptodate(folio))
+		return folio;		/* let do_swap_page report the error */
 
-	new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, address);
-	if (new_page &&
-	    mem_cgroup_charge(page_folio(new_page), vma->vm_mm, GFP_KERNEL)) {
-		put_page(new_page);
-		new_page = NULL;
+	new_folio = vma_alloc_folio(GFP_HIGHUSER_MOVABLE, 0, vma, addr, false);
+	if (new_folio &&
+	    mem_cgroup_charge(new_folio, vma->vm_mm, GFP_KERNEL)) {
+		folio_put(new_folio);
+		new_folio = NULL;
 	}
-	if (new_page) {
-		copy_user_highpage(new_page, page, address, vma);
-
-		SetPageDirty(new_page);
-		__SetPageUptodate(new_page);
-		__SetPageLocked(new_page);
+	if (new_folio) {
+		if (copy_mc_user_highpage(folio_page(new_folio, 0), page,
+								addr, vma)) {
+			folio_put(new_folio);
+			memory_failure_queue(folio_pfn(folio), 0);
+			return ERR_PTR(-EHWPOISON);
+		}
+		folio_set_dirty(new_folio);
+		__folio_mark_uptodate(new_folio);
+		__folio_set_locked(new_folio);
 #ifdef CONFIG_SWAP
 		count_vm_event(KSM_SWPIN_COPY);
 #endif
 	}
 
-	return new_page;
+	return new_folio;
 }
 
 void rmap_walk_ksm(struct folio *folio, struct rmap_walk_control *rwc)
@@ -2711,6 +3167,51 @@ again:
 	if (!search_new_forks++)
 		goto again;
 }
+
+#ifdef CONFIG_MEMORY_FAILURE
+/*
+ * Collect processes when the error hit an ksm page.
+ */
+void collect_procs_ksm(struct page *page, struct list_head *to_kill,
+		       int force_early)
+{
+	struct ksm_stable_node *stable_node;
+	struct ksm_rmap_item *rmap_item;
+	struct folio *folio = page_folio(page);
+	struct vm_area_struct *vma;
+	struct task_struct *tsk;
+
+	stable_node = folio_stable_node(folio);
+	if (!stable_node)
+		return;
+	hlist_for_each_entry(rmap_item, &stable_node->hlist, hlist) {
+		struct anon_vma *av = rmap_item->anon_vma;
+
+		anon_vma_lock_read(av);
+		rcu_read_lock();
+		for_each_process(tsk) {
+			struct anon_vma_chain *vmac;
+			unsigned long addr;
+			struct task_struct *t =
+				task_early_kill(tsk, force_early);
+			if (!t)
+				continue;
+			anon_vma_interval_tree_foreach(vmac, &av->rb_root, 0,
+						       ULONG_MAX)
+			{
+				vma = vmac->vma;
+				if (vma->vm_mm == t->mm) {
+					addr = rmap_item->address & PAGE_MASK;
+					add_to_kill_ksm(t, page, vma, to_kill,
+							addr);
+				}
+			}
+		}
+		rcu_read_unlock();
+		anon_vma_unlock_read(av);
+	}
+}
+#endif
 
 #ifdef CONFIG_MIGRATION
 void folio_migrate_ksm(struct folio *newfolio, struct folio *folio)
@@ -2866,6 +3367,14 @@ static void wait_while_offlining(void)
 }
 #endif /* CONFIG_MEMORY_HOTREMOVE */
 
+#ifdef CONFIG_PROC_FS
+long ksm_process_profit(struct mm_struct *mm)
+{
+	return (long)(mm->ksm_merging_pages + mm->ksm_zero_pages) * PAGE_SIZE -
+		mm->ksm_rmap_items * sizeof(struct ksm_rmap_item);
+}
+#endif /* CONFIG_PROC_FS */
+
 #ifdef CONFIG_SYSFS
 /*
  * This all compiles without CONFIG_SYSFS, but is a waste of space.
@@ -2912,6 +3421,9 @@ static ssize_t pages_to_scan_store(struct kobject *kobj,
 {
 	unsigned int nr_pages;
 	int err;
+
+	if (ksm_advisor != KSM_ADVISOR_NONE)
+		return -EINVAL;
 
 	err = kstrtouint(buf, 10, &nr_pages);
 	if (err)
@@ -3092,6 +3604,13 @@ static ssize_t max_page_sharing_store(struct kobject *kobj,
 }
 KSM_ATTR(max_page_sharing);
 
+static ssize_t pages_scanned_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%lu\n", ksm_pages_scanned);
+}
+KSM_ATTR_RO(pages_scanned);
+
 static ssize_t pages_shared_show(struct kobject *kobj,
 				 struct kobj_attribute *attr, char *buf)
 {
@@ -3129,6 +3648,32 @@ static ssize_t pages_volatile_show(struct kobject *kobj,
 	return sysfs_emit(buf, "%ld\n", ksm_pages_volatile);
 }
 KSM_ATTR_RO(pages_volatile);
+
+static ssize_t pages_skipped_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%lu\n", ksm_pages_skipped);
+}
+KSM_ATTR_RO(pages_skipped);
+
+static ssize_t ksm_zero_pages_show(struct kobject *kobj,
+				struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%ld\n", ksm_zero_pages);
+}
+KSM_ATTR_RO(ksm_zero_pages);
+
+static ssize_t general_profit_show(struct kobject *kobj,
+				   struct kobj_attribute *attr, char *buf)
+{
+	long general_profit;
+
+	general_profit = (ksm_pages_sharing + ksm_zero_pages) * PAGE_SIZE -
+				ksm_rmap_items * sizeof(struct ksm_rmap_item);
+
+	return sysfs_emit(buf, "%ld\n", general_profit);
+}
+KSM_ATTR_RO(general_profit);
 
 static ssize_t stable_node_dups_show(struct kobject *kobj,
 				     struct kobj_attribute *attr, char *buf)
@@ -3177,14 +3722,163 @@ static ssize_t full_scans_show(struct kobject *kobj,
 }
 KSM_ATTR_RO(full_scans);
 
+static ssize_t smart_scan_show(struct kobject *kobj,
+			       struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", ksm_smart_scan);
+}
+
+static ssize_t smart_scan_store(struct kobject *kobj,
+				struct kobj_attribute *attr,
+				const char *buf, size_t count)
+{
+	int err;
+	bool value;
+
+	err = kstrtobool(buf, &value);
+	if (err)
+		return -EINVAL;
+
+	ksm_smart_scan = value;
+	return count;
+}
+KSM_ATTR(smart_scan);
+
+static ssize_t advisor_mode_show(struct kobject *kobj,
+				 struct kobj_attribute *attr, char *buf)
+{
+	const char *output;
+
+	if (ksm_advisor == KSM_ADVISOR_NONE)
+		output = "[none] scan-time";
+	else if (ksm_advisor == KSM_ADVISOR_SCAN_TIME)
+		output = "none [scan-time]";
+
+	return sysfs_emit(buf, "%s\n", output);
+}
+
+static ssize_t advisor_mode_store(struct kobject *kobj,
+				  struct kobj_attribute *attr, const char *buf,
+				  size_t count)
+{
+	enum ksm_advisor_type curr_advisor = ksm_advisor;
+
+	if (sysfs_streq("scan-time", buf))
+		ksm_advisor = KSM_ADVISOR_SCAN_TIME;
+	else if (sysfs_streq("none", buf))
+		ksm_advisor = KSM_ADVISOR_NONE;
+	else
+		return -EINVAL;
+
+	/* Set advisor default values */
+	if (curr_advisor != ksm_advisor)
+		set_advisor_defaults();
+
+	return count;
+}
+KSM_ATTR(advisor_mode);
+
+static ssize_t advisor_max_cpu_show(struct kobject *kobj,
+				    struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", ksm_advisor_max_cpu);
+}
+
+static ssize_t advisor_max_cpu_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buf, size_t count)
+{
+	int err;
+	unsigned long value;
+
+	err = kstrtoul(buf, 10, &value);
+	if (err)
+		return -EINVAL;
+
+	ksm_advisor_max_cpu = value;
+	return count;
+}
+KSM_ATTR(advisor_max_cpu);
+
+static ssize_t advisor_min_pages_to_scan_show(struct kobject *kobj,
+					struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%lu\n", ksm_advisor_min_pages_to_scan);
+}
+
+static ssize_t advisor_min_pages_to_scan_store(struct kobject *kobj,
+					struct kobj_attribute *attr,
+					const char *buf, size_t count)
+{
+	int err;
+	unsigned long value;
+
+	err = kstrtoul(buf, 10, &value);
+	if (err)
+		return -EINVAL;
+
+	ksm_advisor_min_pages_to_scan = value;
+	return count;
+}
+KSM_ATTR(advisor_min_pages_to_scan);
+
+static ssize_t advisor_max_pages_to_scan_show(struct kobject *kobj,
+					struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%lu\n", ksm_advisor_max_pages_to_scan);
+}
+
+static ssize_t advisor_max_pages_to_scan_store(struct kobject *kobj,
+					struct kobj_attribute *attr,
+					const char *buf, size_t count)
+{
+	int err;
+	unsigned long value;
+
+	err = kstrtoul(buf, 10, &value);
+	if (err)
+		return -EINVAL;
+
+	ksm_advisor_max_pages_to_scan = value;
+	return count;
+}
+KSM_ATTR(advisor_max_pages_to_scan);
+
+static ssize_t advisor_target_scan_time_show(struct kobject *kobj,
+					     struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%lu\n", ksm_advisor_target_scan_time);
+}
+
+static ssize_t advisor_target_scan_time_store(struct kobject *kobj,
+					      struct kobj_attribute *attr,
+					      const char *buf, size_t count)
+{
+	int err;
+	unsigned long value;
+
+	err = kstrtoul(buf, 10, &value);
+	if (err)
+		return -EINVAL;
+	if (value < 1)
+		return -EINVAL;
+
+	ksm_advisor_target_scan_time = value;
+	return count;
+}
+KSM_ATTR(advisor_target_scan_time);
+
 static struct attribute *ksm_attrs[] = {
 	&sleep_millisecs_attr.attr,
 	&pages_to_scan_attr.attr,
 	&run_attr.attr,
+	&pages_scanned_attr.attr,
 	&pages_shared_attr.attr,
 	&pages_sharing_attr.attr,
 	&pages_unshared_attr.attr,
 	&pages_volatile_attr.attr,
+	&pages_skipped_attr.attr,
+	&ksm_zero_pages_attr.attr,
 	&full_scans_attr.attr,
 #ifdef CONFIG_NUMA
 	&merge_across_nodes_attr.attr,
@@ -3194,6 +3888,13 @@ static struct attribute *ksm_attrs[] = {
 	&stable_node_dups_attr.attr,
 	&stable_node_chains_prune_millisecs_attr.attr,
 	&use_zero_pages_attr.attr,
+	&general_profit_attr.attr,
+	&smart_scan_attr.attr,
+	&advisor_mode_attr.attr,
+	&advisor_max_cpu_attr.attr,
+	&advisor_min_pages_to_scan_attr.attr,
+	&advisor_max_pages_to_scan_attr.attr,
+	&advisor_target_scan_time_attr.attr,
 	NULL,
 };
 

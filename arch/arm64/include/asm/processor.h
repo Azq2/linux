@@ -161,12 +161,15 @@ struct thread_struct {
 	enum fp_type		fp_type;	/* registers FPSIMD or SVE? */
 	unsigned int		fpsimd_cpu;
 	void			*sve_state;	/* SVE registers, if any */
-	void			*za_state;	/* ZA register, if any */
+	void			*sme_state;	/* ZA and ZT state, if any */
 	unsigned int		vl[ARM64_VEC_MAX];	/* vector length */
 	unsigned int		vl_onexec[ARM64_VEC_MAX]; /* vl after next exec */
 	unsigned long		fault_address;	/* fault info */
 	unsigned long		fault_code;	/* ESR_EL1 value */
 	struct debug_info	debug;		/* debugging */
+
+	struct user_fpsimd_state	kernel_fpsimd_state;
+	unsigned int			kernel_fpsimd_cpu;
 #ifdef CONFIG_ARM64_PTR_AUTH
 	struct ptrauth_keys_user	keys_user;
 #ifdef CONFIG_ARM64_PTR_AUTH_KERNEL
@@ -357,14 +360,6 @@ static inline void prefetch(const void *ptr)
 static inline void prefetchw(const void *ptr)
 {
 	asm volatile("prfm pstl1keep, %a0\n" : : "p" (ptr));
-}
-
-#define ARCH_HAS_SPINLOCK_PREFETCH
-static inline void spin_lock_prefetch(const void *ptr)
-{
-	asm volatile(ARM64_LSE_ATOMIC_INSN(
-		     "prfm pstl1strm, %a0",
-		     "nop") : : "p" (ptr));
 }
 
 extern unsigned long __ro_after_init signal_minsigstksz; /* sigframe size */

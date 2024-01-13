@@ -10,8 +10,13 @@
 #define _ASM_S390_FPU_INTERNAL_H
 
 #include <linux/string.h>
-#include <asm/ctl_reg.h>
+#include <asm/facility.h>
 #include <asm/fpu/types.h>
+
+static inline bool cpu_has_vx(void)
+{
+	return likely(test_facility(129));
+}
 
 static inline void save_vx_regs(__vector128 *vxrs)
 {
@@ -27,7 +32,7 @@ static inline void convert_vx_to_fp(freg_t *fprs, __vector128 *vxrs)
 	int i;
 
 	for (i = 0; i < __NUM_FPRS; i++)
-		fprs[i] = *(freg_t *)(vxrs + i);
+		fprs[i].ui = vxrs[i].high;
 }
 
 static inline void convert_fp_to_vx(__vector128 *vxrs, freg_t *fprs)
@@ -35,14 +40,14 @@ static inline void convert_fp_to_vx(__vector128 *vxrs, freg_t *fprs)
 	int i;
 
 	for (i = 0; i < __NUM_FPRS; i++)
-		*(freg_t *)(vxrs + i) = fprs[i];
+		vxrs[i].high = fprs[i].ui;
 }
 
 static inline void fpregs_store(_s390_fp_regs *fpregs, struct fpu *fpu)
 {
 	fpregs->pad = 0;
 	fpregs->fpc = fpu->fpc;
-	if (MACHINE_HAS_VX)
+	if (cpu_has_vx())
 		convert_vx_to_fp((freg_t *)&fpregs->fprs, fpu->vxrs);
 	else
 		memcpy((freg_t *)&fpregs->fprs, fpu->fprs,
@@ -52,7 +57,7 @@ static inline void fpregs_store(_s390_fp_regs *fpregs, struct fpu *fpu)
 static inline void fpregs_load(_s390_fp_regs *fpregs, struct fpu *fpu)
 {
 	fpu->fpc = fpregs->fpc;
-	if (MACHINE_HAS_VX)
+	if (cpu_has_vx())
 		convert_fp_to_vx(fpu->vxrs, (freg_t *)&fpregs->fprs);
 	else
 		memcpy(fpu->fprs, (freg_t *)&fpregs->fprs,

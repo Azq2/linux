@@ -1466,8 +1466,8 @@ int brcmf_p2p_notify_action_frame_rx(struct brcmf_if *ifp,
 			       ETH_ALEN);
 	memcpy(mgmt_frame->sa, e->addr, ETH_ALEN);
 	mgmt_frame->frame_control = cpu_to_le16(IEEE80211_STYPE_ACTION);
-	memcpy(&mgmt_frame->u, frame, mgmt_frame_len);
-	mgmt_frame_len += offsetof(struct ieee80211_mgmt, u);
+	memcpy(mgmt_frame->u.body, frame, mgmt_frame_len);
+	mgmt_frame_len += offsetof(struct ieee80211_mgmt, u.body);
 
 	freq = ieee80211_channel_to_frequency(ch.control_ch_num,
 					      ch.band == BRCMU_CHAN_BAND_2G ?
@@ -2334,7 +2334,7 @@ struct wireless_dev *brcmf_p2p_add_vif(struct wiphy *wiphy, const char *name,
 		goto fail;
 	}
 
-	strncpy(ifp->ndev->name, name, sizeof(ifp->ndev->name) - 1);
+	strscpy(ifp->ndev->name, name, sizeof(ifp->ndev->name));
 	ifp->ndev->name_assign_type = name_assign_type;
 	err = brcmf_net_attach(ifp, true);
 	if (err) {

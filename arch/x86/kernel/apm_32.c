@@ -239,12 +239,6 @@ extern int (*console_blank_hook)(int);
 #endif
 
 /*
- * The apm_bios device is one of the misc char devices.
- * This is its minor number.
- */
-#define	APM_MINOR_DEV	134
-
-/*
  * Various options can be changed at boot time as follows:
  * (We allow underscores for compatibility with the modules code)
  *	apm=on/off			enable/disable APM
@@ -426,7 +420,7 @@ static DEFINE_MUTEX(apm_mutex);
  * This is for buggy BIOS's that refer to (real mode) segment 0x40
  * even though they are called in protected mode.
  */
-static struct desc_struct bad_bios_desc = GDT_ENTRY_INIT(0x4092,
+static struct desc_struct bad_bios_desc = GDT_ENTRY_INIT(DESC_DATA32_BIOS,
 			(unsigned long)__va(0x400UL), PAGE_SIZE - 0x400 - 1);
 
 static const char driver_version[] = "1.16ac";	/* no spaces */
@@ -609,7 +603,7 @@ static long __apm_bios_call(void *_call)
 
 	apm_irq_save(flags);
 	firmware_restrict_branch_speculation_start();
-	ibt = ibt_save();
+	ibt = ibt_save(true);
 	APM_DO_SAVE_SEGS;
 	apm_bios_call_asm(call->func, call->ebx, call->ecx,
 			  &call->eax, &call->ebx, &call->ecx, &call->edx,
@@ -690,7 +684,7 @@ static long __apm_bios_call_simple(void *_call)
 
 	apm_irq_save(flags);
 	firmware_restrict_branch_speculation_start();
-	ibt = ibt_save();
+	ibt = ibt_save(true);
 	APM_DO_SAVE_SEGS;
 	error = apm_bios_call_simple_asm(call->func, call->ebx, call->ecx,
 					 &call->eax);

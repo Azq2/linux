@@ -26,6 +26,7 @@
 #define IPV6_AUTOFLOWLABEL	70
 
 #define TC_ACT_UNSPEC		(-1)
+#define TC_ACT_OK		0
 #define TC_ACT_SHOT		2
 
 #define SOL_TCP			6
@@ -88,6 +89,7 @@
 #define sk_v6_rcv_saddr		__sk_common.skc_v6_rcv_saddr
 #define sk_flags		__sk_common.skc_flags
 #define sk_reuse		__sk_common.skc_reuse
+#define sk_cookie		__sk_common.skc_cookie
 
 #define s6_addr32		in6_u.u6_addr32
 

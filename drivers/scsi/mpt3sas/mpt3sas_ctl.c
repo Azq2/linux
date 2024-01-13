@@ -1884,7 +1884,7 @@ mpt3sas_enable_diag_buffer(struct MPT3SAS_ADAPTER *ioc, u8 bits_to_register)
 			    diag_register.requested_buffer_size>>10);
 		else if (ioc->diag_buffer_status[MPI2_DIAG_BUF_TYPE_TRACE]
 		    & MPT3_DIAG_BUFFER_IS_REGISTERED) {
-			ioc_err(ioc, "Trace buffer memory %d KB allocated\n",
+			ioc_info(ioc, "Trace buffer memory %d KB allocated\n",
 			    diag_register.requested_buffer_size>>10);
 			if (ioc->hba_mpi_version_belonged != MPI2_VERSION)
 				ioc->diag_buffer_status[
@@ -4157,31 +4157,37 @@ mpt3sas_ctl_init(ushort hbas_to_enumerate)
 }
 
 /**
+ * mpt3sas_ctl_release - release dma for ctl
+ * @ioc: per adapter object
+ */
+void
+mpt3sas_ctl_release(struct MPT3SAS_ADAPTER *ioc)
+{
+	int i;
+
+	/* free memory associated to diag buffers */
+	for (i = 0; i < MPI2_DIAG_BUF_TYPE_COUNT; i++) {
+		if (!ioc->diag_buffer[i])
+			continue;
+		dma_free_coherent(&ioc->pdev->dev,
+				  ioc->diag_buffer_sz[i],
+				  ioc->diag_buffer[i],
+				  ioc->diag_buffer_dma[i]);
+		ioc->diag_buffer[i] = NULL;
+		ioc->diag_buffer_status[i] = 0;
+	}
+
+	kfree(ioc->event_log);
+}
+
+/**
  * mpt3sas_ctl_exit - exit point for ctl
  * @hbas_to_enumerate: ?
  */
 void
 mpt3sas_ctl_exit(ushort hbas_to_enumerate)
 {
-	struct MPT3SAS_ADAPTER *ioc;
-	int i;
 
-	list_for_each_entry(ioc, &mpt3sas_ioc_list, list) {
-
-		/* free memory associated to diag buffers */
-		for (i = 0; i < MPI2_DIAG_BUF_TYPE_COUNT; i++) {
-			if (!ioc->diag_buffer[i])
-				continue;
-			dma_free_coherent(&ioc->pdev->dev,
-					  ioc->diag_buffer_sz[i],
-					  ioc->diag_buffer[i],
-					  ioc->diag_buffer_dma[i]);
-			ioc->diag_buffer[i] = NULL;
-			ioc->diag_buffer_status[i] = 0;
-		}
-
-		kfree(ioc->event_log);
-	}
 	if (hbas_to_enumerate != 1)
 		misc_deregister(&ctl_dev);
 	if (hbas_to_enumerate != 2)

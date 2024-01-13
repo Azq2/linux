@@ -66,7 +66,7 @@ static const char * const sym_regex_kernel[S_NSYMTYPES] = {
 	[S_REL] =
 	"^(__init_(begin|end)|"
 	"__x86_cpu_dev_(start|end)|"
-	"(__parainstructions|__alt_instructions)(_end)?|"
+	"__alt_instructions(_end)?|"
 	"(__iommu_table|__apicdrivers|__smp_locks)(_end)?|"
 	"__(start|end)_pci_.*|"
 #if CONFIG_FW_LOADER
@@ -406,7 +406,7 @@ static void read_ehdr(FILE *fp)
 	if (ehdr.e_version != EV_CURRENT)
 		die("Unknown ELF version\n");
 	if (ehdr.e_ehsize != sizeof(Elf_Ehdr))
-		die("Bad Elf header size\n");
+		die("Bad ELF header size\n");
 	if (ehdr.e_phentsize != sizeof(Elf_Phdr))
 		die("Bad program header entry\n");
 	if (ehdr.e_shentsize != sizeof(Elf_Shdr))

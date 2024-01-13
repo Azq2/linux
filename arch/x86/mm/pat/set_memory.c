@@ -9,6 +9,7 @@
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/seq_file.h>
+#include <linux/proc_fs.h>
 #include <linux/debugfs.h>
 #include <linux/pfn.h>
 #include <linux/percpu.h>
@@ -231,10 +232,10 @@ within_inclusive(unsigned long addr, unsigned long start, unsigned long end)
  * points to #2, but almost all physical-to-virtual translations point to #1.
  *
  * This is so that we can have both a directmap of all physical memory *and*
- * take full advantage of the the limited (s32) immediate addressing range (2G)
+ * take full advantage of the limited (s32) immediate addressing range (2G)
  * of x86_64.
  *
- * See Documentation/x86/x86_64/mm.rst for more detail.
+ * See Documentation/arch/x86/x86_64/mm.rst for more detail.
  */
 
 static inline unsigned long highmap_start_pfn(void)
@@ -1620,7 +1621,7 @@ repeat:
 
 		/*
 		 * We need to keep the pfn from the existing PTE,
-		 * after all we're only going to change it's attributes
+		 * after all we're only going to change its attributes
 		 * not the memory it points to
 		 */
 		new_pte = pfn_pte(pfn, new_prot);
@@ -2073,12 +2074,12 @@ int set_memory_nx(unsigned long addr, int numpages)
 
 int set_memory_ro(unsigned long addr, int numpages)
 {
-	return change_page_attr_clear(&addr, numpages, __pgprot(_PAGE_RW), 0);
+	return change_page_attr_clear(&addr, numpages, __pgprot(_PAGE_RW | _PAGE_DIRTY), 0);
 }
 
 int set_memory_rox(unsigned long addr, int numpages)
 {
-	pgprot_t clr = __pgprot(_PAGE_RW);
+	pgprot_t clr = __pgprot(_PAGE_RW | _PAGE_DIRTY);
 
 	if (__supported_pte_mask & _PAGE_NX)
 		clr.pgprot |= _PAGE_NX;
@@ -2151,7 +2152,8 @@ static int __set_memory_enc_pgtable(unsigned long addr, int numpages, bool enc)
 		cpa_flush(&cpa, x86_platform.guest.enc_cache_flush_required());
 
 	/* Notify hypervisor that we are about to set/clr encryption attribute. */
-	x86_platform.guest.enc_status_change_prepare(addr, numpages, enc);
+	if (!x86_platform.guest.enc_status_change_prepare(addr, numpages, enc))
+		return -EIO;
 
 	ret = __change_page_attr_set_clr(&cpa, 1);
 
@@ -2175,9 +2177,6 @@ static int __set_memory_enc_pgtable(unsigned long addr, int numpages, bool enc)
 
 static int __set_memory_enc_dec(unsigned long addr, int numpages, bool enc)
 {
-	if (hv_is_isolation_supported())
-		return hv_set_mem_host_visibility(addr, numpages, !enc);
-
 	if (cc_platform_has(CC_ATTR_MEM_ENCRYPT))
 		return __set_memory_enc_pgtable(addr, numpages, enc);
 
@@ -2448,7 +2447,7 @@ int __init kernel_unmap_pages_in_pgd(pgd_t *pgd, unsigned long address,
 	/*
 	 * The typical sequence for unmapping is to find a pte through
 	 * lookup_address_in_pgd() (ideally, it should never return NULL because
-	 * the address is already mapped) and change it's protections. As pfn is
+	 * the address is already mapped) and change its protections. As pfn is
 	 * the *target* of a mapping, it's not useful while unmapping.
 	 */
 	struct cpa_data cpa = {

@@ -8,7 +8,7 @@ Dynamic DMA mapping Guide
 
 This is a guide to device driver writers on how to use the DMA API
 with example pseudo-code.  For a concise description of the API, see
-DMA-API.txt.
+Documentation/core-api/dma-api.rst.
 
 CPU and DMA addresses
 =====================
@@ -185,7 +185,7 @@ device struct of your device is embedded in the bus-specific device struct of
 your device.  For example, &pdev->dev is a pointer to the device struct of a
 PCI device (pdev is a pointer to the PCI device struct of your device).
 
-These calls usually return zero to indicated your device can perform DMA
+These calls usually return zero to indicate your device can perform DMA
 properly on the machine given the address mask you provided, but they might
 return an error if the mask is too small to be supportable on the given
 system.  If it returns non-zero, your device cannot perform DMA properly on

@@ -479,12 +479,29 @@ static int fixup_unreferenced_params(struct snd_pcm_substream *substream,
 {
 	const struct snd_interval *i;
 	const struct snd_mask *m;
+	struct snd_mask *m_rw;
 	int err;
 
 	if (!params->msbits) {
 		i = hw_param_interval_c(params, SNDRV_PCM_HW_PARAM_SAMPLE_BITS);
 		if (snd_interval_single(i))
 			params->msbits = snd_interval_value(i);
+	}
+
+	if (params->msbits) {
+		m = hw_param_mask_c(params, SNDRV_PCM_HW_PARAM_FORMAT);
+		if (snd_mask_single(m)) {
+			snd_pcm_format_t format = (__force snd_pcm_format_t)snd_mask_min(m);
+
+			if (snd_pcm_format_linear(format) &&
+			    snd_pcm_format_width(format) != params->msbits) {
+				m_rw = hw_param_mask(params, SNDRV_PCM_HW_PARAM_SUBFORMAT);
+				snd_mask_reset(m_rw,
+					       (__force unsigned)SNDRV_PCM_SUBFORMAT_MSBITS_MAX);
+				if (snd_mask_empty(m_rw))
+					return -EINVAL;
+			}
+		}
 	}
 
 	if (!params->rate_den) {
@@ -809,7 +826,7 @@ static int snd_pcm_hw_params(struct snd_pcm_substream *substream,
 		runtime->boundary *= 2;
 
 	/* clear the buffer for avoiding possible kernel info leaks */
-	if (runtime->dma_area && !substream->ops->copy_user) {
+	if (runtime->dma_area && !substream->ops->copy) {
 		size_t size = runtime->dma_bytes;
 
 		if (runtime->info & SNDRV_PCM_INFO_MMAP)
@@ -1605,10 +1622,6 @@ static int snd_pcm_do_pause(struct snd_pcm_substream *substream,
 {
 	if (substream->runtime->trigger_master != substream)
 		return 0;
-	/* some drivers might use hw_ptr to recover from the pause -
-	   update the hw_ptr now */
-	if (pause_pushed(state))
-		snd_pcm_update_hw_ptr(substream);
 	/* The jiffies check in snd_pcm_update_hw_ptr*() is done by
 	 * a delta between the current jiffies, this gives a large enough
 	 * delta, effectively to skip the check once.
@@ -2159,12 +2172,12 @@ static int snd_pcm_drain(struct snd_pcm_substream *substream,
 		if (runtime->no_period_wakeup)
 			tout = MAX_SCHEDULE_TIMEOUT;
 		else {
-			tout = 10;
+			tout = 100;
 			if (runtime->rate) {
-				long t = runtime->period_size * 2 / runtime->rate;
+				long t = runtime->buffer_size * 1100 / runtime->rate;
 				tout = max(t, tout);
 			}
-			tout = msecs_to_jiffies(tout * 1000);
+			tout = msecs_to_jiffies(tout);
 		}
 		tout = schedule_timeout(tout);
 
@@ -2187,7 +2200,7 @@ static int snd_pcm_drain(struct snd_pcm_substream *substream,
 				result = -ESTRPIPE;
 			else {
 				dev_dbg(substream->pcm->card->dev,
-					"playback drain error (DMA or IRQ trouble?)\n");
+					"playback drain timeout (DMA or IRQ trouble?)\n");
 				snd_pcm_stop(substream, SNDRV_PCM_STATE_SETUP);
 				result = -EIO;
 			}
@@ -2487,6 +2500,41 @@ static int snd_pcm_hw_rule_buffer_bytes_max(struct snd_pcm_hw_params *params,
 	return snd_interval_refine(hw_param_interval(params, rule->var), &t);
 }		
 
+static int snd_pcm_hw_rule_subformats(struct snd_pcm_hw_params *params,
+				      struct snd_pcm_hw_rule *rule)
+{
+	struct snd_mask *sfmask = hw_param_mask(params, SNDRV_PCM_HW_PARAM_SUBFORMAT);
+	struct snd_mask *fmask = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
+	u32 *subformats = rule->private;
+	snd_pcm_format_t f;
+	struct snd_mask m;
+
+	snd_mask_none(&m);
+	/* All PCMs support at least the default STD subformat. */
+	snd_mask_set(&m, (__force unsigned)SNDRV_PCM_SUBFORMAT_STD);
+
+	pcm_for_each_format(f) {
+		if (!snd_mask_test(fmask, (__force unsigned)f))
+			continue;
+
+		if (f == SNDRV_PCM_FORMAT_S32_LE && *subformats)
+			m.bits[0] |= *subformats;
+		else if (snd_pcm_format_linear(f))
+			snd_mask_set(&m, (__force unsigned)SNDRV_PCM_SUBFORMAT_MSBITS_MAX);
+	}
+
+	return snd_mask_refine(sfmask, &m);
+}
+
+static int snd_pcm_hw_constraint_subformats(struct snd_pcm_runtime *runtime,
+					   unsigned int cond, u32 *subformats)
+{
+	return snd_pcm_hw_rule_add(runtime, cond, -1,
+				   snd_pcm_hw_rule_subformats, (void *)subformats,
+				   SNDRV_PCM_HW_PARAM_SUBFORMAT,
+				   SNDRV_PCM_HW_PARAM_FORMAT, -1);
+}
+
 static int snd_pcm_hw_constraints_init(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
@@ -2638,8 +2686,7 @@ static int snd_pcm_hw_constraints_complete(struct snd_pcm_substream *substream)
 	if (err < 0)
 		return err;
 
-	err = snd_pcm_hw_constraint_mask(runtime, SNDRV_PCM_HW_PARAM_SUBFORMAT,
-					 PARAM_MASK_BIT(SNDRV_PCM_SUBFORMAT_STD));
+	err = snd_pcm_hw_constraint_subformats(runtime, 0, &hw->subformats);
 	if (err < 0)
 		return err;
 
@@ -3093,7 +3140,7 @@ struct snd_pcm_mmap_status32 {
 	snd_pcm_state_t suspended_state;
 	s32 audio_tstamp_sec;
 	s32 audio_tstamp_nsec;
-} __attribute__((packed));
+} __packed;
 
 struct snd_pcm_mmap_control32 {
 	u32 appl_ptr;
@@ -3110,7 +3157,7 @@ struct snd_pcm_sync_ptr32 {
 		struct snd_pcm_mmap_control32 control;
 		unsigned char reserved[64];
 	} c;
-} __attribute__((packed));
+} __packed;
 
 /* recalcuate the boundary within 32bit */
 static snd_pcm_uframes_t recalculate_boundary(struct snd_pcm_runtime *runtime)
@@ -3521,6 +3568,7 @@ static ssize_t snd_pcm_readv(struct kiocb *iocb, struct iov_iter *to)
 	unsigned long i;
 	void __user **bufs;
 	snd_pcm_uframes_t frames;
+	const struct iovec *iov = iter_iov(to);
 
 	pcm_file = iocb->ki_filp->private_data;
 	substream = pcm_file->substream;
@@ -3530,18 +3578,20 @@ static ssize_t snd_pcm_readv(struct kiocb *iocb, struct iov_iter *to)
 	if (runtime->state == SNDRV_PCM_STATE_OPEN ||
 	    runtime->state == SNDRV_PCM_STATE_DISCONNECTED)
 		return -EBADFD;
-	if (!iter_is_iovec(to))
+	if (!user_backed_iter(to))
 		return -EINVAL;
 	if (to->nr_segs > 1024 || to->nr_segs != runtime->channels)
 		return -EINVAL;
-	if (!frame_aligned(runtime, to->iov->iov_len))
+	if (!frame_aligned(runtime, iov->iov_len))
 		return -EINVAL;
-	frames = bytes_to_samples(runtime, to->iov->iov_len);
+	frames = bytes_to_samples(runtime, iov->iov_len);
 	bufs = kmalloc_array(to->nr_segs, sizeof(void *), GFP_KERNEL);
 	if (bufs == NULL)
 		return -ENOMEM;
-	for (i = 0; i < to->nr_segs; ++i)
-		bufs[i] = to->iov[i].iov_base;
+	for (i = 0; i < to->nr_segs; ++i) {
+		bufs[i] = iov->iov_base;
+		iov++;
+	}
 	result = snd_pcm_lib_readv(substream, bufs, frames);
 	if (result > 0)
 		result = frames_to_bytes(runtime, result);
@@ -3558,6 +3608,7 @@ static ssize_t snd_pcm_writev(struct kiocb *iocb, struct iov_iter *from)
 	unsigned long i;
 	void __user **bufs;
 	snd_pcm_uframes_t frames;
+	const struct iovec *iov = iter_iov(from);
 
 	pcm_file = iocb->ki_filp->private_data;
 	substream = pcm_file->substream;
@@ -3567,17 +3618,19 @@ static ssize_t snd_pcm_writev(struct kiocb *iocb, struct iov_iter *from)
 	if (runtime->state == SNDRV_PCM_STATE_OPEN ||
 	    runtime->state == SNDRV_PCM_STATE_DISCONNECTED)
 		return -EBADFD;
-	if (!iter_is_iovec(from))
+	if (!user_backed_iter(from))
 		return -EINVAL;
 	if (from->nr_segs > 128 || from->nr_segs != runtime->channels ||
-	    !frame_aligned(runtime, from->iov->iov_len))
+	    !frame_aligned(runtime, iov->iov_len))
 		return -EINVAL;
-	frames = bytes_to_samples(runtime, from->iov->iov_len);
+	frames = bytes_to_samples(runtime, iov->iov_len);
 	bufs = kmalloc_array(from->nr_segs, sizeof(void *), GFP_KERNEL);
 	if (bufs == NULL)
 		return -ENOMEM;
-	for (i = 0; i < from->nr_segs; ++i)
-		bufs[i] = from->iov[i].iov_base;
+	for (i = 0; i < from->nr_segs; ++i) {
+		bufs[i] = iov->iov_base;
+		iov++;
+	}
 	result = snd_pcm_lib_writev(substream, bufs, frames);
 	if (result > 0)
 		result = frames_to_bytes(runtime, result);
@@ -3675,8 +3728,9 @@ static int snd_pcm_mmap_status(struct snd_pcm_substream *substream, struct file 
 		return -EINVAL;
 	area->vm_ops = &snd_pcm_vm_ops_status;
 	area->vm_private_data = substream;
-	area->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
-	area->vm_flags &= ~(VM_WRITE | VM_MAYWRITE);
+	vm_flags_mod(area, VM_DONTEXPAND | VM_DONTDUMP,
+		     VM_WRITE | VM_MAYWRITE);
+
 	return 0;
 }
 
@@ -3712,7 +3766,7 @@ static int snd_pcm_mmap_control(struct snd_pcm_substream *substream, struct file
 		return -EINVAL;
 	area->vm_ops = &snd_pcm_vm_ops_control;
 	area->vm_private_data = substream;
-	area->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+	vm_flags_set(area, VM_DONTEXPAND | VM_DONTDUMP);
 	return 0;
 }
 
@@ -3828,7 +3882,7 @@ static const struct vm_operations_struct snd_pcm_vm_ops_data_fault = {
 int snd_pcm_lib_default_mmap(struct snd_pcm_substream *substream,
 			     struct vm_area_struct *area)
 {
-	area->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+	vm_flags_set(area, VM_DONTEXPAND | VM_DONTDUMP);
 	if (!substream->ops->page &&
 	    !snd_dma_buffer_mmap(snd_pcm_get_dma_buf(substream), area))
 		return 0;

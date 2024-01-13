@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0+
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Copyright (C) 2017 Oracle.  All Rights Reserved.
- * Author: Darrick J. Wong <darrick.wong@oracle.com>
+ * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
+ * Author: Darrick J. Wong <djwong@kernel.org>
  */
 #ifndef __XFS_SCRUB_SCRUB_H__
 #define __XFS_SCRUB_SCRUB_H__
@@ -34,6 +34,14 @@ struct xchk_meta_ops {
 
 	/* Repair or optimize the metadata. */
 	int		(*repair)(struct xfs_scrub *);
+
+	/*
+	 * Re-scrub the metadata we repaired, in case there's extra work that
+	 * we need to do to check our repair work.  If this is NULL, we'll use
+	 * the ->scrub function pointer, assuming that the regular scrub is
+	 * sufficient.
+	 */
+	int		(*repair_eval)(struct xfs_scrub *sc);
 
 	/* Decide if we even have this piece of metadata. */
 	bool		(*has)(struct xfs_mount *);
@@ -77,7 +85,21 @@ struct xfs_scrub {
 	 */
 	struct xfs_inode		*ip;
 
+	/* Kernel memory buffer used by scrubbers; freed at teardown. */
 	void				*buf;
+
+	/*
+	 * Clean up resources owned by whatever is in the buffer.  Cleanup can
+	 * be deferred with this hook as a means for scrub functions to pass
+	 * data to repair functions.  This function must not free the buffer
+	 * itself.
+	 */
+	void				(*buf_cleanup)(void *buf);
+
+	/* xfile used by the scrubbers; freed at teardown. */
+	struct xfile			*xfile;
+
+	/* Lock flags for @ip. */
 	uint				ilock_flags;
 
 	/* See the XCHK/XREP state flags below. */
@@ -95,9 +117,20 @@ struct xfs_scrub {
 };
 
 /* XCHK state flags grow up from zero, XREP state flags grown down from 2^31 */
-#define XCHK_TRY_HARDER		(1 << 0)  /* can't get resources, try again */
-#define XCHK_REAPING_DISABLED	(1 << 2)  /* background block reaping paused */
-#define XREP_ALREADY_FIXED	(1 << 31) /* checking our repair work */
+#define XCHK_TRY_HARDER		(1U << 0)  /* can't get resources, try again */
+#define XCHK_HAVE_FREEZE_PROT	(1U << 1)  /* do we have freeze protection? */
+#define XCHK_FSGATES_DRAIN	(1U << 2)  /* defer ops draining enabled */
+#define XCHK_NEED_DRAIN		(1U << 3)  /* scrub needs to drain defer ops */
+#define XREP_RESET_PERAG_RESV	(1U << 30) /* must reset AG space reservation */
+#define XREP_ALREADY_FIXED	(1U << 31) /* checking our repair work */
+
+/*
+ * The XCHK_FSGATES* flags reflect functionality in the main filesystem that
+ * are only enabled for this particular online fsck.  When not in use, the
+ * features are gated off via dynamic code patching, which is why the state
+ * must be enabled during scrub setup and can only be torn down afterwards.
+ */
+#define XCHK_FSGATES_ALL	(XCHK_FSGATES_DRAIN)
 
 /* Metadata scrubbers */
 int xchk_tester(struct xfs_scrub *sc);
@@ -105,10 +138,8 @@ int xchk_superblock(struct xfs_scrub *sc);
 int xchk_agf(struct xfs_scrub *sc);
 int xchk_agfl(struct xfs_scrub *sc);
 int xchk_agi(struct xfs_scrub *sc);
-int xchk_bnobt(struct xfs_scrub *sc);
-int xchk_cntbt(struct xfs_scrub *sc);
-int xchk_inobt(struct xfs_scrub *sc);
-int xchk_finobt(struct xfs_scrub *sc);
+int xchk_allocbt(struct xfs_scrub *sc);
+int xchk_iallocbt(struct xfs_scrub *sc);
 int xchk_rmapbt(struct xfs_scrub *sc);
 int xchk_refcountbt(struct xfs_scrub *sc);
 int xchk_inode(struct xfs_scrub *sc);
@@ -152,7 +183,7 @@ void xchk_xref_is_not_inode_chunk(struct xfs_scrub *sc, xfs_agblock_t agbno,
 		xfs_extlen_t len);
 void xchk_xref_is_inode_chunk(struct xfs_scrub *sc, xfs_agblock_t agbno,
 		xfs_extlen_t len);
-void xchk_xref_is_owned_by(struct xfs_scrub *sc, xfs_agblock_t agbno,
+void xchk_xref_is_only_owned_by(struct xfs_scrub *sc, xfs_agblock_t agbno,
 		xfs_extlen_t len, const struct xfs_owner_info *oinfo);
 void xchk_xref_is_not_owned_by(struct xfs_scrub *sc, xfs_agblock_t agbno,
 		xfs_extlen_t len, const struct xfs_owner_info *oinfo);
@@ -161,6 +192,8 @@ void xchk_xref_has_no_owner(struct xfs_scrub *sc, xfs_agblock_t agbno,
 void xchk_xref_is_cow_staging(struct xfs_scrub *sc, xfs_agblock_t bno,
 		xfs_extlen_t len);
 void xchk_xref_is_not_shared(struct xfs_scrub *sc, xfs_agblock_t bno,
+		xfs_extlen_t len);
+void xchk_xref_is_not_cow_staging(struct xfs_scrub *sc, xfs_agblock_t bno,
 		xfs_extlen_t len);
 #ifdef CONFIG_XFS_RT
 void xchk_xref_is_used_rt_space(struct xfs_scrub *sc, xfs_rtblock_t rtbno,

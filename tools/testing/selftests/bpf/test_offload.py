@@ -169,12 +169,14 @@ def bpftool(args, JSON=True, ns="", fail=True, include_stderr=False):
     return tool("bpftool", args, {"json":"-p"}, JSON=JSON, ns=ns,
                 fail=fail, include_stderr=include_stderr)
 
-def bpftool_prog_list(expected=None, ns=""):
+def bpftool_prog_list(expected=None, ns="", exclude_orphaned=True):
     _, progs = bpftool("prog show", JSON=True, ns=ns, fail=True)
     # Remove the base progs
     for p in base_progs:
         if p in progs:
             progs.remove(p)
+    if exclude_orphaned:
+        progs = [ p for p in progs if not p['orphaned'] ]
     if expected is not None:
         if len(progs) != expected:
             fail(True, "%d BPF programs loaded, expected %d" %
@@ -612,11 +614,9 @@ def pin_map(file_name, idx=0, expected=1):
 
 def check_dev_info_removed(prog_file=None, map_file=None):
     bpftool_prog_list(expected=0)
+    bpftool_prog_list(expected=1, exclude_orphaned=False)
     ret, err = bpftool("prog show pin %s" % (prog_file), fail=False)
-    fail(ret == 0, "Showing prog with removed device did not fail")
-    fail(err["error"].find("No such device") == -1,
-         "Showing prog with removed device expected ENODEV, error is %s" %
-         (err["error"]))
+    fail(ret != 0, "failed to show prog with removed device")
 
     bpftool_map_list(expected=0)
     ret, err = bpftool("map show pin %s" % (map_file), fail=False)
@@ -1039,7 +1039,7 @@ try:
     offload = bpf_pinned("/sys/fs/bpf/offload")
     ret, _, err = sim.set_xdp(offload, "drv", fail=False, include_stderr=True)
     fail(ret == 0, "attached offloaded XDP program to drv")
-    check_extack(err, "Using device-bound program without HW_MODE flag is not supported.", args)
+    check_extack(err, "Using offloaded program without HW_MODE flag is not supported.", args)
     rm("/sys/fs/bpf/offload")
     sim.wait_for_flush()
 
@@ -1088,12 +1088,12 @@ try:
     ret, _, err = sim.set_xdp(pinned, "offload",
                               fail=False, include_stderr=True)
     fail(ret == 0, "Pinned program loaded for a different device accepted")
-    check_extack_nsim(err, "program bound to different dev.", args)
+    check_extack(err, "Program bound to different device.", args)
     simdev2.remove()
     ret, _, err = sim.set_xdp(pinned, "offload",
                               fail=False, include_stderr=True)
     fail(ret == 0, "Pinned program loaded for a removed device accepted")
-    check_extack_nsim(err, "xdpoffload of non-bound program.", args)
+    check_extack(err, "Program bound to different device.", args)
     rm(pin_file)
     bpftool_prog_list_wait(expected=0)
 
@@ -1334,12 +1334,12 @@ try:
     ret, _, err = simA.set_xdp(progB, "offload", force=True, JSON=False,
                                fail=False, include_stderr=True)
     fail(ret == 0, "cross-ASIC program allowed")
-    check_extack_nsim(err, "program bound to different dev.", args)
+    check_extack(err, "Program bound to different device.", args)
     for d in simdevB.nsims:
         ret, _, err = d.set_xdp(progA, "offload", force=True, JSON=False,
                                 fail=False, include_stderr=True)
         fail(ret == 0, "cross-ASIC program allowed")
-        check_extack_nsim(err, "program bound to different dev.", args)
+        check_extack(err, "Program bound to different device.", args)
 
     start_test("Test multi-dev ASIC cross-dev map reuse...")
 
@@ -1395,10 +1395,7 @@ try:
 
     start_test("Test multi-dev ASIC cross-dev destruction - orphaned...")
     ret, out = bpftool("prog show %s" % (progB), fail=False)
-    fail(ret == 0, "got information about orphaned program")
-    fail("error" not in out, "no error reported for get info on orphaned")
-    fail(out["error"] != "can't get prog info: No such device",
-         "wrong error for get info on orphaned")
+    fail(ret != 0, "couldn't get information about orphaned program")
 
     print("%s: OK" % (os.path.basename(__file__)))
 

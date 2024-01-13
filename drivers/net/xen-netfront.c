@@ -45,7 +45,7 @@
 #include <linux/slab.h>
 #include <net/ip.h>
 #include <linux/bpf.h>
-#include <net/page_pool.h>
+#include <net/page_pool/types.h>
 #include <linux/bpf_trace.h>
 
 #include <xen/xen.h>
@@ -1741,6 +1741,8 @@ static struct net_device *xennet_create_dev(struct xenbus_device *dev)
          * negotiate with the backend regarding supported features.
          */
 	netdev->features |= netdev->hw_features;
+	netdev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
+			       NETDEV_XDP_ACT_NDO_XMIT;
 
 	netdev->ethtool_ops = &xennet_ethtool_ops;
 	netdev->min_mtu = ETH_MIN_MTU;

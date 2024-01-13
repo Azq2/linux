@@ -204,9 +204,9 @@ aoedisk_rm_debugfs(struct aoedev *d)
 }
 
 static int
-aoeblk_open(struct block_device *bdev, fmode_t mode)
+aoeblk_open(struct gendisk *disk, blk_mode_t mode)
 {
-	struct aoedev *d = bdev->bd_disk->private_data;
+	struct aoedev *d = disk->private_data;
 	ulong flags;
 
 	if (!virt_addr_valid(d)) {
@@ -232,7 +232,7 @@ aoeblk_open(struct block_device *bdev, fmode_t mode)
 }
 
 static void
-aoeblk_release(struct gendisk *disk, fmode_t mode)
+aoeblk_release(struct gendisk *disk)
 {
 	struct aoedev *d = disk->private_data;
 	ulong flags;
@@ -285,7 +285,7 @@ aoeblk_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 }
 
 static int
-aoeblk_ioctl(struct block_device *bdev, fmode_t mode, uint cmd, ulong arg)
+aoeblk_ioctl(struct block_device *bdev, blk_mode_t mode, uint cmd, ulong arg)
 {
 	struct aoedev *d;
 
@@ -383,7 +383,8 @@ aoeblk_gdalloc(void *vp)
 	WARN_ON(d->flags & DEVFL_TKILL);
 	WARN_ON(d->gd);
 	WARN_ON(d->flags & DEVFL_UP);
-	blk_queue_max_hw_sectors(gd->queue, BLK_DEF_MAX_SECTORS);
+	/* random number picked from the history block max_sectors cap */
+	blk_queue_max_hw_sectors(gd->queue, 2560u);
 	blk_queue_io_opt(gd->queue, SZ_2M);
 	d->bufpool = mp;
 	d->blkq = gd->queue;

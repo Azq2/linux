@@ -9,11 +9,8 @@ While much of the kernel's user-space API is documented elsewhere
 also be found in the kernel tree itself.  This manual is intended to be the
 place where this information is gathered.
 
-.. class:: toc-title
-
-	   Table of contents
-
 .. toctree::
+   :caption: Table of contents
    :maxdepth: 2
 
    no_new_privs
@@ -22,7 +19,9 @@ place where this information is gathered.
    unshare
    spec_ctrl
    accelerators/ocxl
+   dma-buf-alloc-exchange
    ebpf/index
+   ELF
    ioctl/index
    iommu
    iommufd
@@ -31,6 +30,10 @@ place where this information is gathered.
    sysfs-platform_profile
    vduse
    futex2
+   lsm
+   tee
+   isapnp
+   dcdbas
 
 .. only::  subproject and html
 

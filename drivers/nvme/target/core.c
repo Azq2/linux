@@ -756,8 +756,10 @@ static void __nvmet_req_complete(struct nvmet_req *req, u16 status)
 
 void nvmet_req_complete(struct nvmet_req *req, u16 status)
 {
+	struct nvmet_sq *sq = req->sq;
+
 	__nvmet_req_complete(req, status);
-	percpu_ref_put(&req->sq->ref);
+	percpu_ref_put(&sq->ref);
 }
 EXPORT_SYMBOL_GPL(nvmet_req_complete);
 
@@ -1422,9 +1424,6 @@ u16 nvmet_alloc_ctrl(const char *subsysnqn, const char *hostnqn,
 			GFP_KERNEL);
 	if (!ctrl->sqs)
 		goto out_free_changed_ns_list;
-
-	if (subsys->cntlid_min > subsys->cntlid_max)
-		goto out_free_sqs;
 
 	ret = ida_alloc_range(&cntlid_ida,
 			     subsys->cntlid_min, subsys->cntlid_max,

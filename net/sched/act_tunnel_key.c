@@ -401,7 +401,7 @@ static int tunnel_key_init(struct net *net, struct nlattr *nla,
 		return err;
 	exists = err;
 	if (exists && bind)
-		return 0;
+		return ACT_P_BOUND;
 
 	switch (parm->t_action) {
 	case TCA_TUNNEL_KEY_ACT_RELEASE:
@@ -419,6 +419,9 @@ static int tunnel_key_init(struct net *net, struct nlattr *nla,
 		if (tb[TCA_TUNNEL_KEY_NO_CSUM] &&
 		    nla_get_u8(tb[TCA_TUNNEL_KEY_NO_CSUM]))
 			flags &= ~TUNNEL_CSUM;
+
+		if (nla_get_flag(tb[TCA_TUNNEL_KEY_NO_FRAG]))
+			flags |= TUNNEL_DONT_FRAGMENT;
 
 		if (tb[TCA_TUNNEL_KEY_ENC_DST_PORT])
 			dst_port = nla_get_be16(tb[TCA_TUNNEL_KEY_ENC_DST_PORT]);
@@ -747,6 +750,8 @@ static int tunnel_key_dump(struct sk_buff *skb, struct tc_action *a,
 				   key->tp_dst)) ||
 		    nla_put_u8(skb, TCA_TUNNEL_KEY_NO_CSUM,
 			       !(key->tun_flags & TUNNEL_CSUM)) ||
+		    ((key->tun_flags & TUNNEL_DONT_FRAGMENT) &&
+		     nla_put_flag(skb, TCA_TUNNEL_KEY_NO_FRAG)) ||
 		    tunnel_key_opts_dump(skb, info))
 			goto nla_put_failure;
 

@@ -20,6 +20,9 @@
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/sysfb.h>
+
+#include "of_private.h"
 
 const struct of_device_id of_default_bus_match_table[] = {
 	{ .compatible = "simple-bus", },
@@ -28,11 +31,6 @@ const struct of_device_id of_default_bus_match_table[] = {
 #ifdef CONFIG_ARM_AMBA
 	{ .compatible = "arm,amba-bus", },
 #endif /* CONFIG_ARM_AMBA */
-	{} /* Empty terminated list */
-};
-
-static const struct of_device_id of_skipped_node_table[] = {
-	{ .compatible = "operating-points-v2", },
 	{} /* Empty terminated list */
 };
 
@@ -54,7 +52,44 @@ struct platform_device *of_find_device_by_node(struct device_node *np)
 }
 EXPORT_SYMBOL(of_find_device_by_node);
 
+int of_device_add(struct platform_device *ofdev)
+{
+	BUG_ON(ofdev->dev.of_node == NULL);
+
+	/* name and id have to be set so that the platform bus doesn't get
+	 * confused on matching */
+	ofdev->name = dev_name(&ofdev->dev);
+	ofdev->id = PLATFORM_DEVID_NONE;
+
+	/*
+	 * If this device has not binding numa node in devicetree, that is
+	 * of_node_to_nid returns NUMA_NO_NODE. device_add will assume that this
+	 * device is on the same node as the parent.
+	 */
+	set_dev_node(&ofdev->dev, of_node_to_nid(ofdev->dev.of_node));
+
+	return device_add(&ofdev->dev);
+}
+
+int of_device_register(struct platform_device *pdev)
+{
+	device_initialize(&pdev->dev);
+	return of_device_add(pdev);
+}
+EXPORT_SYMBOL(of_device_register);
+
+void of_device_unregister(struct platform_device *ofdev)
+{
+	device_unregister(&ofdev->dev);
+}
+EXPORT_SYMBOL(of_device_unregister);
+
 #ifdef CONFIG_OF_ADDRESS
+static const struct of_device_id of_skipped_node_table[] = {
+	{ .compatible = "operating-points-v2", },
+	{} /* Empty terminated list */
+};
+
 /*
  * The following routines scan a subtree and registers a device for
  * each applicable node.
@@ -140,8 +175,8 @@ struct platform_device *of_device_alloc(struct device_node *np,
 		}
 	}
 
-	dev->dev.of_node = of_node_get(np);
-	dev->dev.fwnode = &np->fwnode;
+	/* setup generic device info */
+	device_set_node(&dev->dev, of_fwnode_handle(of_node_get(np)));
 	dev->dev.parent = parent ? : &platform_bus;
 
 	if (bus_id)
@@ -222,7 +257,6 @@ static struct amba_device *of_amba_device_create(struct device_node *node,
 						 struct device *parent)
 {
 	struct amba_device *dev;
-	const void *prop;
 	int ret;
 
 	pr_debug("Creating amba device %pOF\n", node);
@@ -240,8 +274,7 @@ static struct amba_device *of_amba_device_create(struct device_node *node,
 	dev->dev.dma_mask = &dev->dev.coherent_dma_mask;
 
 	/* setup generic device info */
-	dev->dev.of_node = of_node_get(node);
-	dev->dev.fwnode = &node->fwnode;
+	device_set_node(&dev->dev, of_fwnode_handle(node));
 	dev->dev.parent = parent ? : &platform_bus;
 	dev->dev.platform_data = platform_data;
 	if (bus_id)
@@ -250,9 +283,7 @@ static struct amba_device *of_amba_device_create(struct device_node *node,
 		of_device_make_bus_id(&dev->dev);
 
 	/* Allow the HW Peripheral ID to be overridden */
-	prop = of_get_property(node, "arm,primecell-periphid", NULL);
-	if (prop)
-		dev->periphid = of_read_ulong(prop, 1);
+	of_property_read_u32(node, "arm,primecell-periphid", &dev->periphid);
 
 	ret = of_address_to_resource(node, 0, &dev->res);
 	if (ret) {
@@ -525,10 +556,11 @@ static int __init of_platform_default_populate_init(void)
 	if (IS_ENABLED(CONFIG_PPC)) {
 		struct device_node *boot_display = NULL;
 		struct platform_device *dev;
+		int display_number = 0;
 		int ret;
 
 		/* Check if we have a MacOS display without a node spec */
-		if (of_get_property(of_chosen, "linux,bootx-noscreen", NULL)) {
+		if (of_property_present(of_chosen, "linux,bootx-noscreen")) {
 			/*
 			 * The old code tried to work out which node was the MacOS
 			 * display based on the address. I'm dropping that since the
@@ -556,15 +588,22 @@ static int __init of_platform_default_populate_init(void)
 			    !of_get_property(node, "linux,boot-display", NULL))
 				continue;
 			dev = of_platform_device_create(node, "of-display", NULL);
+			of_node_put(node);
 			if (WARN_ON(!dev))
 				return -ENOMEM;
 			boot_display = node;
+			display_number++;
 			break;
 		}
 		for_each_node_by_type(node, "display") {
+			char buf[14];
+			const char *of_display_format = "of-display.%d";
+
 			if (!of_get_property(node, "linux,opened", NULL) || node == boot_display)
 				continue;
-			of_platform_device_create(node, "of-display", NULL);
+			ret = snprintf(buf, sizeof(buf), of_display_format, display_number++);
+			if (ret < sizeof(buf))
+				of_platform_device_create(node, buf, NULL);
 		}
 
 	} else {
@@ -583,8 +622,21 @@ static int __init of_platform_default_populate_init(void)
 		}
 
 		node = of_get_compatible_child(of_chosen, "simple-framebuffer");
-		of_platform_device_create(node, NULL, NULL);
-		of_node_put(node);
+		if (node) {
+			/*
+			 * Since a "simple-framebuffer" device is already added
+			 * here, disable the Generic System Framebuffers (sysfb)
+			 * to prevent it from registering another device for the
+			 * system framebuffer later (e.g: using the screen_info
+			 * data that may had been filled as well).
+			 *
+			 * This can happen for example on DT systems that do EFI
+			 * booting and may provide a GOP handle to the EFI stub.
+			 */
+			sysfb_disable();
+			of_platform_device_create(node, NULL, NULL);
+			of_node_put(node);
+		}
 
 		/* Populate everything else. */
 		of_platform_default_populate(NULL, NULL, NULL);
@@ -630,7 +682,7 @@ EXPORT_SYMBOL_GPL(of_platform_device_destroy);
  * @parent: device which children will be removed
  *
  * Complementary to of_platform_populate(), this function removes children
- * of the given device (and, recurrently, their children) that have been
+ * of the given device (and, recursively, their children) that have been
  * created from their respective device tree nodes (and only those,
  * leaving others - eg. manually created - unharmed).
  */
@@ -699,7 +751,7 @@ static int devm_of_platform_match(struct device *dev, void *res, void *data)
  * @dev: device that requested to depopulate from device tree data
  *
  * Complementary to devm_of_platform_populate(), this function removes children
- * of the given device (and, recurrently, their children) that have been
+ * of the given device (and, recursively, their children) that have been
  * created from their respective device tree nodes (and only those,
  * leaving others - eg. manually created - unharmed).
  */
@@ -732,6 +784,11 @@ static int of_platform_notify(struct notifier_block *nb,
 		if (of_node_check_flag(rd->dn, OF_POPULATED))
 			return NOTIFY_OK;
 
+		/*
+		 * Clear the flag before adding the device so that fw_devlink
+		 * doesn't skip adding consumers to this device.
+		 */
+		rd->dn->fwnode.flags &= ~FWNODE_FLAG_NOT_DEVICE;
 		/* pdev_parent may be NULL when no bus platform device */
 		pdev_parent = of_find_device_by_node(rd->dn->parent);
 		pdev = of_platform_device_create(rd->dn, NULL,

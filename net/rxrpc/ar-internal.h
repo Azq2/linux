@@ -68,6 +68,7 @@ struct rxrpc_net {
 	atomic_t		nr_calls;	/* Count of allocated calls */
 
 	atomic_t		nr_conns;
+	struct list_head	bundle_proc_list; /* List of bundles for proc */
 	struct list_head	conn_proc_list;	/* List of conns in this namespace for proc */
 	struct list_head	service_conns;	/* Service conns in this namespace */
 	rwlock_t		conn_lock;	/* Lock for ->conn_proc_list, ->service_conns */
@@ -149,7 +150,7 @@ struct rxrpc_sock {
 	struct list_head	sock_calls;	/* List of calls owned by this socket */
 	struct list_head	to_be_accepted;	/* calls awaiting acceptance */
 	struct list_head	recvmsg_q;	/* Calls awaiting recvmsg's attention  */
-	rwlock_t		recvmsg_lock;	/* Lock for recvmsg_q */
+	spinlock_t		recvmsg_lock;	/* Lock for recvmsg_q */
 	struct key		*key;		/* security for this socket */
 	struct key		*securities;	/* list of server security descriptors */
 	struct rb_root		calls;		/* User ID -> call mapping */
@@ -284,7 +285,9 @@ struct rxrpc_local {
 	struct task_struct	*io_thread;
 	struct completion	io_thread_ready; /* Indication that the I/O thread started */
 	struct rxrpc_sock	*service;	/* Service(s) listening on this endpoint */
-	struct rw_semaphore	defrag_sem;	/* control re-enablement of IP DF bit */
+#ifdef CONFIG_AF_RXRPC_INJECT_RX_DELAY
+	struct sk_buff_head	rx_delay_queue;	/* Delay injection queue */
+#endif
 	struct sk_buff_head	rx_queue;	/* Received packets */
 	struct list_head	conn_attend_q;	/* Conns requiring immediate attention */
 	struct list_head	call_attend_q;	/* Calls requiring immediate attention */
@@ -362,6 +365,7 @@ struct rxrpc_conn_proto {
 
 struct rxrpc_conn_parameters {
 	struct rxrpc_local	*local;		/* Representation of local endpoint */
+	struct rxrpc_peer	*peer;		/* Representation of remote endpoint */
 	struct key		*key;		/* Security details */
 	bool			exclusive;	/* T if conn is exclusive */
 	bool			upgrade;	/* T if service ID can be upgraded */
@@ -429,6 +433,7 @@ struct rxrpc_bundle {
 	struct rxrpc_local	*local;		/* Representation of local endpoint */
 	struct rxrpc_peer	*peer;		/* Remote endpoint */
 	struct key		*key;		/* Security details */
+	struct list_head	proc_link;	/* Link in net->bundle_proc_list */
 	const struct rxrpc_security *security;	/* applied security module */
 	refcount_t		ref;
 	atomic_t		active;		/* Number of active users */
@@ -442,6 +447,7 @@ struct rxrpc_bundle {
 	struct rb_node		local_node;	/* Node in local->client_conns */
 	struct list_head	waiting_calls;	/* Calls waiting for channels */
 	unsigned long		avail_chans;	/* Mask of available channels */
+	unsigned int		conn_ids[4];	/* Connection IDs. */
 	struct rxrpc_connection	*conns[4];	/* The connections in the bundle (max 4) */
 };
 
@@ -614,6 +620,7 @@ struct rxrpc_call {
 	unsigned long		expect_term_by;	/* When we expect call termination by */
 	u32			next_rx_timo;	/* Timeout for next Rx packet (jif) */
 	u32			next_req_timo;	/* Timeout for next Rx request packet (jif) */
+	u32			hard_timo;	/* Maximum lifetime or 0 (jif) */
 	struct timer_list	timer;		/* Combined event timer */
 	struct work_struct	destroyer;	/* In-process-context destroyer */
 	rxrpc_notify_rx_t	notify_rx;	/* kernel service Rx notification function */
@@ -688,9 +695,11 @@ struct rxrpc_call {
 
 	/* Receive-phase ACK management (ACKs we send). */
 	u8			ackr_reason;	/* reason to ACK */
+	u16			ackr_sack_base;	/* Starting slot in SACK table ring */
 	rxrpc_serial_t		ackr_serial;	/* serial of packet being ACK'd */
-	atomic64_t		ackr_window;	/* Base (in LSW) and top (in MSW) of SACK window */
-	atomic_t		ackr_nr_unacked; /* Number of unacked packets */
+	rxrpc_seq_t		ackr_window;	/* Base of SACK window */
+	rxrpc_seq_t		ackr_wtop;	/* Base of SACK window */
+	unsigned int		ackr_nr_unacked; /* Number of unacked packets */
 	atomic_t		ackr_nr_consumed; /* Number of packets needing hard ACK */
 	struct {
 #define RXRPC_SACK_SIZE 256
@@ -795,7 +804,7 @@ struct rxrpc_txbuf {
 			u8	data[RXRPC_JUMBO_DATALEN]; /* Data packet */
 			struct {
 				struct rxrpc_ackpacket ack;
-				u8 acks[0];
+				DECLARE_FLEX_ARRAY(u8, acks);
 			};
 		};
 	} __aligned(64);
@@ -862,7 +871,6 @@ struct rxrpc_call *rxrpc_find_call_by_user_ID(struct rxrpc_sock *, unsigned long
 struct rxrpc_call *rxrpc_alloc_call(struct rxrpc_sock *, gfp_t, unsigned int);
 struct rxrpc_call *rxrpc_new_client_call(struct rxrpc_sock *,
 					 struct rxrpc_conn_parameters *,
-					 struct sockaddr_rxrpc *,
 					 struct rxrpc_call_params *, gfp_t,
 					 unsigned int);
 void rxrpc_start_call_timer(struct rxrpc_call *call);
@@ -1063,6 +1071,7 @@ int rxrpc_get_server_data_key(struct rxrpc_connection *, const void *, time64_t,
 /*
  * local_event.c
  */
+void rxrpc_gen_version_string(void);
 void rxrpc_send_version_request(struct rxrpc_local *local,
 				struct rxrpc_host_header *hdr,
 				struct sk_buff *skb);
@@ -1109,6 +1118,9 @@ extern unsigned long rxrpc_idle_ack_delay;
 extern unsigned int rxrpc_rx_window_size;
 extern unsigned int rxrpc_rx_mtu;
 extern unsigned int rxrpc_rx_jumbo_max;
+#ifdef CONFIG_AF_RXRPC_INJECT_RX_DELAY
+extern unsigned long rxrpc_inject_rx_delay;
+#endif
 
 /*
  * net_ns.c
@@ -1158,6 +1170,7 @@ void rxrpc_put_peer(struct rxrpc_peer *, enum rxrpc_peer_trace);
  */
 extern const struct seq_operations rxrpc_call_seq_ops;
 extern const struct seq_operations rxrpc_connection_seq_ops;
+extern const struct seq_operations rxrpc_bundle_seq_ops;
 extern const struct seq_operations rxrpc_peer_seq_ops;
 extern const struct seq_operations rxrpc_local_seq_ops;
 

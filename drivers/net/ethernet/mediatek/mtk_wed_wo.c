@@ -7,10 +7,9 @@
 
 #include <linux/kernel.h>
 #include <linux/dma-mapping.h>
-#include <linux/of_platform.h>
 #include <linux/interrupt.h>
-#include <linux/of_address.h>
 #include <linux/mfd/syscon.h>
+#include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/bitfield.h>
 
@@ -138,13 +137,13 @@ mtk_wed_wo_queue_refill(struct mtk_wed_wo *wo, struct mtk_wed_wo_queue *q,
 	enum dma_data_direction dir = rx ? DMA_FROM_DEVICE : DMA_TO_DEVICE;
 	int n_buf = 0;
 
-	spin_lock_bh(&q->lock);
 	while (q->queued < q->n_desc) {
 		struct mtk_wed_wo_queue_entry *entry;
 		dma_addr_t addr;
 		void *buf;
 
-		buf = page_frag_alloc(&q->cache, q->buf_size, GFP_ATOMIC);
+		buf = page_frag_alloc(&q->cache, q->buf_size,
+				      GFP_ATOMIC | GFP_DMA32);
 		if (!buf)
 			break;
 
@@ -172,7 +171,6 @@ mtk_wed_wo_queue_refill(struct mtk_wed_wo *wo, struct mtk_wed_wo_queue *q,
 		q->queued++;
 		n_buf++;
 	}
-	spin_unlock_bh(&q->lock);
 
 	return n_buf;
 }
@@ -260,7 +258,6 @@ mtk_wed_wo_queue_alloc(struct mtk_wed_wo *wo, struct mtk_wed_wo_queue *q,
 		       int n_desc, int buf_size, int index,
 		       struct mtk_wed_wo_queue_regs *regs)
 {
-	spin_lock_init(&q->lock);
 	q->regs = *regs;
 	q->n_desc = n_desc;
 	q->buf_size = buf_size;
@@ -292,16 +289,17 @@ mtk_wed_wo_queue_tx_clean(struct mtk_wed_wo *wo, struct mtk_wed_wo_queue *q)
 	struct page *page;
 	int i;
 
-	spin_lock_bh(&q->lock);
 	for (i = 0; i < q->n_desc; i++) {
 		struct mtk_wed_wo_queue_entry *entry = &q->entry[i];
+
+		if (!entry->buf)
+			continue;
 
 		dma_unmap_single(wo->hw->dev, entry->addr, entry->len,
 				 DMA_TO_DEVICE);
 		skb_free_frag(entry->buf);
 		entry->buf = NULL;
 	}
-	spin_unlock_bh(&q->lock);
 
 	if (!q->cache.va)
 		return;
@@ -316,7 +314,6 @@ mtk_wed_wo_queue_rx_clean(struct mtk_wed_wo *wo, struct mtk_wed_wo_queue *q)
 {
 	struct page *page;
 
-	spin_lock_bh(&q->lock);
 	for (;;) {
 		void *buf = mtk_wed_wo_dequeue(wo, q, NULL, true);
 
@@ -325,7 +322,6 @@ mtk_wed_wo_queue_rx_clean(struct mtk_wed_wo *wo, struct mtk_wed_wo_queue *q)
 
 		skb_free_frag(buf);
 	}
-	spin_unlock_bh(&q->lock);
 
 	if (!q->cache.va)
 		return;
@@ -350,8 +346,6 @@ int mtk_wed_wo_queue_tx_skb(struct mtk_wed_wo *wo, struct mtk_wed_wo_queue *q,
 	struct mtk_wed_wo_queue_desc *desc;
 	int ret = 0, index;
 	u32 ctrl;
-
-	spin_lock_bh(&q->lock);
 
 	q->tail = mtk_wed_mmio_r32(wo, q->regs.dma_idx);
 	index = (q->head + 1) % q->n_desc;
@@ -383,8 +377,6 @@ int mtk_wed_wo_queue_tx_skb(struct mtk_wed_wo *wo, struct mtk_wed_wo_queue *q,
 	mtk_wed_wo_queue_kick(wo, q, q->head);
 	mtk_wed_wo_kickout(wo);
 out:
-	spin_unlock_bh(&q->lock);
-
 	dev_kfree_skb(skb);
 
 	return ret;

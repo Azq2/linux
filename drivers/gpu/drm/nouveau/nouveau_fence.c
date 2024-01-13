@@ -62,7 +62,7 @@ nouveau_fence_signal(struct nouveau_fence *fence)
 	if (test_bit(DMA_FENCE_FLAG_USER_BITS, &fence->base.flags)) {
 		struct nouveau_fence_chan *fctx = nouveau_fctx(fence);
 
-		if (!--fctx->notify_ref)
+		if (atomic_dec_and_test(&fctx->notify_ref))
 			drop = 1;
 	}
 
@@ -96,12 +96,14 @@ nouveau_fence_context_kill(struct nouveau_fence_chan *fctx, int error)
 		if (nouveau_fence_signal(fence))
 			nvif_event_block(&fctx->event);
 	}
+	fctx->killed = 1;
 	spin_unlock_irqrestore(&fctx->lock, flags);
 }
 
 void
 nouveau_fence_context_del(struct nouveau_fence_chan *fctx)
 {
+	cancel_work_sync(&fctx->allow_block_work);
 	nouveau_fence_context_kill(fctx, 0);
 	nvif_event_dtor(&fctx->event);
 	fctx->dead = 1;
@@ -166,6 +168,18 @@ nouveau_fence_wait_uevent_handler(struct nvif_event *event, void *repv, u32 repc
 	return ret;
 }
 
+static void
+nouveau_fence_work_allow_block(struct work_struct *work)
+{
+	struct nouveau_fence_chan *fctx = container_of(work, struct nouveau_fence_chan,
+						       allow_block_work);
+
+	if (atomic_read(&fctx->notify_ref) == 0)
+		nvif_event_block(&fctx->event);
+	else
+		nvif_event_allow(&fctx->event);
+}
+
 void
 nouveau_fence_context_new(struct nouveau_channel *chan, struct nouveau_fence_chan *fctx)
 {
@@ -177,6 +191,7 @@ nouveau_fence_context_new(struct nouveau_channel *chan, struct nouveau_fence_cha
 	} args;
 	int ret;
 
+	INIT_WORK(&fctx->allow_block_work, nouveau_fence_work_allow_block);
 	INIT_LIST_HEAD(&fctx->flip);
 	INIT_LIST_HEAD(&fctx->pending);
 	spin_lock_init(&fctx->lock);
@@ -204,13 +219,13 @@ nouveau_fence_context_new(struct nouveau_channel *chan, struct nouveau_fence_cha
 }
 
 int
-nouveau_fence_emit(struct nouveau_fence *fence, struct nouveau_channel *chan)
+nouveau_fence_emit(struct nouveau_fence *fence)
 {
+	struct nouveau_channel *chan = unrcu_pointer(fence->channel);
 	struct nouveau_fence_chan *fctx = chan->fence;
 	struct nouveau_fence_priv *priv = (void*)chan->drm->fence;
 	int ret;
 
-	fence->channel  = chan;
 	fence->timeout  = jiffies + (15 * HZ);
 
 	if (priv->uevent)
@@ -225,6 +240,12 @@ nouveau_fence_emit(struct nouveau_fence *fence, struct nouveau_channel *chan)
 	if (!ret) {
 		dma_fence_get(&fence->base);
 		spin_lock_irq(&fctx->lock);
+
+		if (unlikely(fctx->killed)) {
+			spin_unlock_irq(&fctx->lock);
+			dma_fence_put(&fence->base);
+			return -ENODEV;
+		}
 
 		if (nouveau_fence_update(chan, fctx))
 			nvif_event_block(&fctx->event);
@@ -396,11 +417,10 @@ nouveau_fence_unref(struct nouveau_fence **pfence)
 }
 
 int
-nouveau_fence_new(struct nouveau_channel *chan, bool sysmem,
-		  struct nouveau_fence **pfence)
+nouveau_fence_create(struct nouveau_fence **pfence,
+		     struct nouveau_channel *chan)
 {
 	struct nouveau_fence *fence;
-	int ret = 0;
 
 	if (unlikely(!chan->fence))
 		return -ENODEV;
@@ -409,11 +429,26 @@ nouveau_fence_new(struct nouveau_channel *chan, bool sysmem,
 	if (!fence)
 		return -ENOMEM;
 
-	ret = nouveau_fence_emit(fence, chan);
-	if (ret)
-		nouveau_fence_unref(&fence);
+	fence->channel = chan;
 
 	*pfence = fence;
+	return 0;
+}
+
+int
+nouveau_fence_new(struct nouveau_fence **pfence,
+		  struct nouveau_channel *chan)
+{
+	int ret = 0;
+
+	ret = nouveau_fence_create(pfence, chan);
+	if (ret)
+		return ret;
+
+	ret = nouveau_fence_emit(*pfence);
+	if (ret)
+		nouveau_fence_unref(pfence);
+
 	return ret;
 }
 
@@ -500,15 +535,19 @@ static bool nouveau_fence_enable_signaling(struct dma_fence *f)
 	struct nouveau_fence *fence = from_fence(f);
 	struct nouveau_fence_chan *fctx = nouveau_fctx(fence);
 	bool ret;
+	bool do_work;
 
-	if (!fctx->notify_ref++)
-		nvif_event_allow(&fctx->event);
+	if (atomic_inc_return(&fctx->notify_ref) == 0)
+		do_work = true;
 
 	ret = nouveau_fence_no_signaling(f);
 	if (ret)
 		set_bit(DMA_FENCE_FLAG_USER_BITS, &fence->base.flags);
-	else if (!--fctx->notify_ref)
-		nvif_event_block(&fctx->event);
+	else if (atomic_dec_and_test(&fctx->notify_ref))
+		do_work = true;
+
+	if (do_work)
+		schedule_work(&fctx->allow_block_work);
 
 	return ret;
 }

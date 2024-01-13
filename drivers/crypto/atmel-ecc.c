@@ -14,7 +14,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
@@ -313,11 +313,10 @@ static struct kpp_alg atmel_ecdh_nist_p256 = {
 
 static int atmel_ecc_probe(struct i2c_client *client)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct atmel_i2c_client_priv *i2c_priv;
 	int ret;
 
-	ret = atmel_i2c_probe(client, id);
+	ret = atmel_i2c_probe(client);
 	if (ret)
 		return ret;
 
@@ -390,7 +389,7 @@ static struct i2c_driver atmel_ecc_driver = {
 		.name	= "atmel-ecc",
 		.of_match_table = of_match_ptr(atmel_ecc_dt_ids),
 	},
-	.probe_new	= atmel_ecc_probe,
+	.probe		= atmel_ecc_probe,
 	.remove		= atmel_ecc_remove,
 	.id_table	= atmel_ecc_id,
 };

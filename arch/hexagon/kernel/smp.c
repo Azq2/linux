@@ -79,7 +79,7 @@ void smp_vm_unmask_irq(void *info)
  * Specifically, first arg is irq, second is the irq_desc.
  */
 
-irqreturn_t handle_ipi(int irq, void *desc)
+static irqreturn_t handle_ipi(int irq, void *desc)
 {
 	int cpu = smp_processor_id();
 	struct ipi_data *ipi = &per_cpu(ipi_data, cpu);
@@ -124,7 +124,7 @@ void __init smp_prepare_boot_cpu(void)
  * to point to current thread info
  */
 
-void start_secondary(void)
+static void start_secondary(void)
 {
 	unsigned long thread_ptr;
 	unsigned int cpu, irq;
@@ -217,7 +217,7 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 	}
 }
 
-void smp_send_reschedule(int cpu)
+void arch_smp_send_reschedule(int cpu)
 {
 	send_ipi(cpumask_of(cpu), IPI_RESCHEDULE);
 }

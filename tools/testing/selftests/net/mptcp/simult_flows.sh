@@ -1,6 +1,8 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 
+. "$(dirname "${0}")/mptcp_lib.sh"
+
 sec=$(date +%s)
 rndh=$(printf %x $sec)-$(mktemp -u XXXXXX)
 ns1="ns1-$rndh"
@@ -33,6 +35,8 @@ cleanup()
 		ip netns del $netns
 	done
 }
+
+mptcp_lib_check_mptcp
 
 ip -Version > /dev/null 2>&1
 if [ $? -ne 0 ];then
@@ -119,23 +123,6 @@ setup()
 	grep -q ' kmemleak_init$\| lockdep_init$\| kasan_init$\| prove_locking$' /proc/kallsyms && slack=$((slack+550))
 }
 
-# $1: ns, $2: port
-wait_local_port_listen()
-{
-	local listener_ns="${1}"
-	local port="${2}"
-
-	local port_hex i
-
-	port_hex="$(printf "%04X" "${port}")"
-	for i in $(seq 10); do
-		ip netns exec "${listener_ns}" cat /proc/net/tcp* | \
-			awk "BEGIN {rc=1} {if (\$2 ~ /:${port_hex}\$/ && \$4 ~ /0A/) {rc=0; exit}} END {exit rc}" &&
-			break
-		sleep 0.1
-	done
-}
-
 do_transfer()
 {
 	local cin=$1
@@ -175,7 +162,7 @@ do_transfer()
 				0.0.0.0 < "$sin" > "$sout" &
 	local spid=$!
 
-	wait_local_port_listen "${ns3}" "${port}"
+	mptcp_lib_wait_local_port_listen "${ns3}" "${port}"
 
 	timeout ${timeout_test} \
 		ip netns exec ${ns1} \
@@ -257,6 +244,7 @@ run_test()
 	printf "%-60s" "$msg"
 	do_transfer $small $large $time
 	lret=$?
+	mptcp_lib_result_code "${lret}" "${msg}"
 	if [ $lret -ne 0 ]; then
 		ret=$lret
 		[ $bail -eq 0 ] || exit $ret
@@ -265,6 +253,7 @@ run_test()
 	printf "%-60s" "$msg - reverse direction"
 	do_transfer $large $small $time
 	lret=$?
+	mptcp_lib_result_code "${lret}" "${msg}"
 	if [ $lret -ne 0 ]; then
 		ret=$lret
 		[ $bail -eq 0 ] || exit $ret
@@ -301,4 +290,6 @@ run_test 10 10 1 50 "balanced bwidth with unbalanced delay"
 run_test 30 10 0 0 "unbalanced bwidth"
 run_test 30 10 1 50 "unbalanced bwidth with unbalanced delay"
 run_test 30 10 50 1 "unbalanced bwidth with opposed, unbalanced delay"
+
+mptcp_lib_result_print_all_tap
 exit $ret

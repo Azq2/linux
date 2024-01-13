@@ -42,12 +42,9 @@ struct init_pgtable_data {
 static int mem_region_callback(struct resource *res, void *arg)
 {
 	struct init_pgtable_data *data = arg;
-	unsigned long mstart, mend;
 
-	mstart = res->start;
-	mend = mstart + resource_size(res) - 1;
-
-	return kernel_ident_mapping_init(data->info, data->level4p, mstart, mend);
+	return kernel_ident_mapping_init(data->info, data->level4p,
+					 res->start, res->end + 1);
 }
 
 static int
@@ -374,17 +371,6 @@ void machine_kexec(struct kimage *image)
 /* arch-dependent functionality related to kexec file-based syscall */
 
 #ifdef CONFIG_KEXEC_FILE
-void *arch_kexec_kernel_image_load(struct kimage *image)
-{
-	if (!image->fops || !image->fops->load)
-		return ERR_PTR(-ENOEXEC);
-
-	return image->fops->load(image, image->kernel_buf,
-				 image->kernel_buf_len, image->initrd_buf,
-				 image->initrd_buf_len, image->cmdline_buf,
-				 image->cmdline_buf_len);
-}
-
 /*
  * Apply purgatory relocations.
  *

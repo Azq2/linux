@@ -21,6 +21,7 @@
 #include <linux/interrupt.h>
 #include <linux/sysctl.h>
 #include <linux/list.h>
+#include <linux/rcupdate_wait.h>
 
 #include <net/ip_vs.h>
 
@@ -549,7 +550,7 @@ void ip_vs_stop_estimator(struct netns_ipvs *ipvs, struct ip_vs_stats *stats)
 	__set_bit(row, kd->avail);
 	if (!kd->tick_len[row]) {
 		RCU_INIT_POINTER(kd->ticks[row], NULL);
-		kfree_rcu(td);
+		kfree_rcu(td, rcu_head);
 	}
 	kd->est_count--;
 	if (kd->est_count) {

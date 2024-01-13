@@ -117,10 +117,6 @@ static inline int tc_act(struct sk_buff *skb, const struct tc_action *a,
 	if (a->ops->act == tcf_ife_act)
 		return tcf_ife_act(skb, a, res);
 #endif
-#if IS_BUILTIN(CONFIG_NET_ACT_IPT)
-	if (a->ops->act == tcf_ipt_act)
-		return tcf_ipt_act(skb, a, res);
-#endif
 #if IS_BUILTIN(CONFIG_NET_ACT_SIMP)
 	if (a->ops->act == tcf_simp_act)
 		return tcf_simp_act(skb, a, res);
@@ -152,9 +148,6 @@ TC_INDIRECT_FILTER_DECLARE(flow_classify);
 TC_INDIRECT_FILTER_DECLARE(fw_classify);
 TC_INDIRECT_FILTER_DECLARE(mall_classify);
 TC_INDIRECT_FILTER_DECLARE(route4_classify);
-TC_INDIRECT_FILTER_DECLARE(rsvp_classify);
-TC_INDIRECT_FILTER_DECLARE(rsvp6_classify);
-TC_INDIRECT_FILTER_DECLARE(tcindex_classify);
 TC_INDIRECT_FILTER_DECLARE(u32_classify);
 
 static inline int tc_classify(struct sk_buff *skb, const struct tcf_proto *tp,
@@ -198,18 +191,6 @@ static inline int tc_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 #if IS_BUILTIN(CONFIG_NET_CLS_ROUTE4)
 	if (tp->classify == route4_classify)
 		return route4_classify(skb, tp, res);
-#endif
-#if IS_BUILTIN(CONFIG_NET_CLS_RSVP)
-	if (tp->classify == rsvp_classify)
-		return rsvp_classify(skb, tp, res);
-#endif
-#if IS_BUILTIN(CONFIG_NET_CLS_RSVP6)
-	if (tp->classify == rsvp6_classify)
-		return rsvp6_classify(skb, tp, res);
-#endif
-#if IS_BUILTIN(CONFIG_NET_CLS_TCINDEX)
-	if (tp->classify == tcindex_classify)
-		return tcindex_classify(skb, tp, res);
 #endif
 
 skip:

@@ -19,6 +19,7 @@
 #include <asm/mipsmtregs.h>
 #include <asm/r4kcache.h>
 #include <asm/cacheflush.h>
+#include <asm/mips_mt.h>
 
 int vpelimit;
 
@@ -234,7 +235,7 @@ static int __init mips_mt_init(void)
 {
 	struct class *mtc;
 
-	mtc = class_create(THIS_MODULE, "mt");
+	mtc = class_create("mt");
 	if (IS_ERR(mtc))
 		return PTR_ERR(mtc);
 

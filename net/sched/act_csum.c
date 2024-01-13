@@ -77,8 +77,8 @@ static int tcf_csum_init(struct net *net, struct nlattr *nla,
 		}
 		ret = ACT_P_CREATED;
 	} else if (err > 0) {
-		if (bind)/* dont override defaults */
-			return 0;
+		if (bind) /* dont override defaults */
+			return ACT_P_BOUND;
 		if (!(flags & TCA_ACT_FLAGS_REPLACE)) {
 			tcf_idr_release(*a, bind);
 			return -EEXIST;
@@ -376,8 +376,7 @@ static int tcf_csum_sctp(struct sk_buff *skb, unsigned int ihl,
 
 	sctph->checksum = sctp_compute_cksum(skb,
 					     skb_network_offset(skb) + ihl);
-	skb->ip_summed = CHECKSUM_NONE;
-	skb->csum_not_inet = 0;
+	skb_reset_csum_not_inet(skb);
 
 	return 1;
 }

@@ -82,8 +82,7 @@ documentation files are also added which explain how to use the feature.
 When a kernel change causes the interface that the kernel exposes to
 userspace to change, it is recommended that you send the information or
 a patch to the manual pages explaining the change to the manual pages
-maintainer at mtk.manpages@gmail.com, and CC the list
-linux-api@vger.kernel.org.
+maintainer at alx@kernel.org, and CC the list linux-api@vger.kernel.org.
 
 Here is a list of files that are in the kernel source tree that are
 required reading:
@@ -138,7 +137,7 @@ required reading:
     philosophy and is very important for people moving to Linux from
     development on other Operating Systems.
 
-  :ref:`Documentation/admin-guide/security-bugs.rst <securitybugs>`
+  :ref:`Documentation/process/security-bugs.rst <securitybugs>`
     If you feel you have found a security problem in the Linux kernel,
     please follow the steps in this document to help notify the kernel
     developers, and help solve the issue.

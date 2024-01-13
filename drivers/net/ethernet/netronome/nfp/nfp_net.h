@@ -617,9 +617,13 @@ struct nfp_net_dp {
  * @vnic_no_name:	For non-port PF vNIC make ndo_get_phys_port_name return
  *			-EOPNOTSUPP to keep backwards compatibility (set by app)
  * @port:		Pointer to nfp_port structure if vNIC is a port
- * @mc_lock:		Protect mc_addrs list
- * @mc_addrs:		List of mc addrs to add/del to HW
- * @mc_work:		Work to update mc addrs
+ * @mbox_amsg:		Asynchronously processed message via mailbox
+ * @mbox_amsg.lock:	Protect message list
+ * @mbox_amsg.list:	List of message to process
+ * @mbox_amsg.work:	Work to process message asynchronously
+ * @fs:			Flow steering
+ * @fs.count:		Flow count
+ * @fs.list:		List of flows
  * @app_priv:		APP private data for this vNIC
  */
 struct nfp_net {
@@ -721,12 +725,54 @@ struct nfp_net {
 
 	struct nfp_port *port;
 
-	spinlock_t mc_lock;
-	struct list_head mc_addrs;
-	struct work_struct mc_work;
+	struct {
+		spinlock_t lock;
+		struct list_head list;
+		struct work_struct work;
+	} mbox_amsg;
+
+	struct {
+		u16 count;
+		struct list_head list;
+	} fs;
 
 	void *app_priv;
 };
+
+struct nfp_fs_entry {
+	struct list_head node;
+	u32 flow_type;
+	u32 loc;
+	struct {
+		union {
+			struct {
+				__be32 sip4;
+				__be32 dip4;
+			};
+			struct {
+				__be32 sip6[4];
+				__be32 dip6[4];
+			};
+		};
+		union {
+			__be16 l3_proto;
+			u8 l4_proto;
+		};
+		__be16 sport;
+		__be16 dport;
+	} key, msk;
+	u64 action;
+};
+
+struct nfp_mbox_amsg_entry {
+	struct list_head list;
+	int (*cfg)(struct nfp_net *nn, struct nfp_mbox_amsg_entry *entry);
+	u32 cmd;
+	char msg[];
+};
+
+int nfp_net_sched_mbox_amsg_work(struct nfp_net *nn, u32 cmd, const void *data, size_t len,
+				 int (*cb)(struct nfp_net *, struct nfp_mbox_amsg_entry *));
 
 /* Functions to read/write from/to a BAR
  * Performs any endian conversion necessary.
@@ -920,9 +966,9 @@ static inline bool nfp_netdev_is_nfp_net(struct net_device *netdev)
 	       netdev->netdev_ops == &nfp_nfdk_netdev_ops;
 }
 
-static inline int nfp_net_coalesce_para_check(u32 usecs, u32 pkts)
+static inline int nfp_net_coalesce_para_check(u32 param)
 {
-	if ((usecs >= ((1 << 16) - 1)) || (pkts >= ((1 << 16) - 1)))
+	if (param >= ((1 << 16) - 1))
 		return -EINVAL;
 
 	return 0;
@@ -973,6 +1019,9 @@ void nfp_net_tls_tx_undo(struct sk_buff *skb, u64 tls_handle);
 struct nfp_net_dp *nfp_net_clone_dp(struct nfp_net *nn);
 int nfp_net_ring_reconfig(struct nfp_net *nn, struct nfp_net_dp *new,
 			  struct netlink_ext_ack *extack);
+
+int nfp_net_fs_add_hw(struct nfp_net *nn, struct nfp_fs_entry *entry);
+int nfp_net_fs_del_hw(struct nfp_net *nn, struct nfp_fs_entry *entry);
 
 #ifdef CONFIG_NFP_DEBUG
 void nfp_net_debugfs_create(void);

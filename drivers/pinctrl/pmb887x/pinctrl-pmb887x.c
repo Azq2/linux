@@ -72,7 +72,7 @@ static void pmb887x_gpio_free(struct gpio_chip *chip, unsigned pin) {
 	struct pmb887x_pinctrl *pctl = gpiochip_get_data(chip);
 	u32 reg = readl_relaxed(pctl->base + GPIO_PIN(pin)) & ~GPIO_ENAQ;
 	writel_relaxed(reg | GPIO_ENAQ_ON, pctl->base + GPIO_PIN(pin));
-	pinctrl_gpio_free(chip->base + pin);
+	pinctrl_gpio_free(chip, pin);
 }
 
 static int pmb887x_gpio_get(struct gpio_chip *chip, unsigned pin) {

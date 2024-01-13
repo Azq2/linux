@@ -416,7 +416,7 @@ static void asc_pm(struct uart_port *port, unsigned int state, unsigned int olds
 	}
 }
 
-u32 asc_calc_fdv_bg(struct uart_port *port, u32 baudrate, u32 *bg, u32 *fdv) {
+static u32 asc_calc_fdv_bg(struct uart_port *port, u32 baudrate, u32 *bg, u32 *fdv) {
 	int div;
 	u32 max_baudrate = port->uartclk / ASC_CLOCK_DIV;
 	if (baudrate >= max_baudrate) { // Maximum baudrate
@@ -694,7 +694,8 @@ static int asc_serial_probe(struct platform_device *pdev) {
 
 static int asc_serial_remove(struct platform_device *pdev) {
 	struct uart_port *port = platform_get_drvdata(pdev);
-	return uart_remove_one_port(&asc_uart_driver, port);
+	uart_remove_one_port(&asc_uart_driver, port);
+	return 0;
 }
 
 static void asc_console_putchar(struct uart_port *port, unsigned char ch) {

@@ -104,6 +104,7 @@
 			compatible = "arm,pl180", "arm,primecell";
 			reg-names = "default", "pmb887x-clc";
 			reg = <0xf7301000 0x1000>, <0xf7300000 4>;
+			dma-names = "mmci0_rx", "mmci0_tx";
 			interrupt-parent = <&intc>;
 			interrupts = <0x94>;
 			clocks = <&fmmc_clk>;

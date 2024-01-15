@@ -8,8 +8,14 @@
 	model = "BenQ-Siemens EL71";
 	compatible = "siemens,el71", "infineon,pmb887x";
 	
+	aliases {
+		serial0 = &usart0;
+		serial1 = &usart1;
+	};
+	
 	chosen {
 		bootargs = "earlyprintk";
+		stdout-path = "serial0:1625000n8";
 	};
 	
 	mmc_vcc: mmc-vcc {
@@ -59,4 +65,6 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&mmc_pins>;
 	bus-width = <1>;
+	cap-sd-highspeed;
+	cap-mmc-highspeed;
 };

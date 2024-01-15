@@ -32,10 +32,6 @@
 #define ASC_MAX_FDV		511
 #define ASC_MAX_BG		8191
 
-#define ASC_RXBUF_DUMMY_RX				0x10000
-#define ASC_RXBUF_DUMMY_BE				0x20000
-#define ASC_RXBUF_DUMMY_OE				0x40000
-
 #define	ASC_CON							(0x10)
 #define	ASC_CON_M						GENMASK(2, 0)			 // ASC Mode Control.
 #define	ASC_CON_M_SHIFT					0
@@ -271,48 +267,90 @@ static void asc_transmit_chars(struct uart_port *port) {
 	uart_port_tx_limited(port, ch, asc_tx_fifo_avail(port), true, asc_tx_char(port, ch), ({}));
 }
 
+static bool asc_is_8bit_mode(struct uart_port *port) {
+	u32 mode = asc_in(port, ASC_CON) & ASC_CON_M;
+	return (mode & (ASC_CON_M_SYNC_8BIT | ASC_CON_M_ASYNC_8BIT | ASC_CON_M_ASYNC_IRDA_8BIT | ASC_CON_M_ASYNC_WAKE_UP_8BIT | ASC_CON_M_ASYNC_PARITY_8BIT)) != 0;
+}
+
+static u32 asc_get_status(struct uart_port *port) {
+	u32 status = ASC_STATUS_RX;
+	u32 lsr = asc_in(port, ASC_CON);
+	
+	if ((lsr & ASC_CON_PE))
+		status |= ASC_STATUS_PE;
+	
+	if ((lsr & ASC_CON_FE))
+		status |= ASC_STATUS_FE;
+	
+	if ((lsr & ASC_CON_OE)) 
+		status |= ASC_STATUS_OE;
+	
+	return status;
+}
+
 static void asc_receive_chars(struct uart_port *port) {
 	struct tty_port *tport = &port->state->port;
-	u32 ch = 0, lsr, fifocnt, status;
+	u32 status, fifocnt;
+	u8 flag, ch;
+	bool ignore_pe = false;
+	
+	/*
+	 * Datasheet states: If the MODE field selects an 8-bit frame then
+	 * this [parity error] bit is undefined. Software should ignore this
+	 * bit when reading 8-bit frames.
+	 */
+	if (asc_is_8bit_mode(port))
+		ignore_pe = true;
+	
+	if (irqd_is_wakeup_set(irq_get_irq_data(port->irq)))
+		pm_wakeup_event(tport->tty->dev, 0);
 	
 	fifocnt = asc_rx_fifo_avail(port);
-	
 	while (fifocnt--) {
-		u8 flag = TTY_NORMAL;
-		ch = readb(port->membase + ASC_RXB);
-		lsr = asc_in(port, ASC_CON);
-		
+		status = asc_get_status(port);
+		ch = asc_in(port, ASC_RXB) & 0xFF;
+		flag = TTY_NORMAL;
 		port->icount.rx++;
 		
-		status = ASC_STATUS_RX;
-		
-		if ((lsr & ASC_CON_PE)) {
-			port->icount.parity++;
-			flag = TTY_PARITY;
-			status |= ASC_STATUS_PE;
-			asc_out(port, ASC_WHBCON, ASC_WHBCON_CLRPE);
+		if ((status & ASC_STATUS_OE) || (status & ASC_STATUS_FE) || ((status & ASC_STATUS_PE) && !ignore_pe)) {
+			if ((status & ASC_STATUS_FE)) {
+				if (ch == 0x00) {
+					port->icount.brk++;
+					if (uart_handle_break(port))
+						continue;
+					status |= ASC_STATUS_BE;
+				} else {
+					port->icount.frame++;
+				}
+			} else if ((status & ASC_STATUS_PE)) {
+				port->icount.parity++;
+			}
+			
+			/*
+			 * Reading any data from the RX FIFO clears the
+			 * overflow error condition.
+			 */
+			if ((status & ASC_STATUS_OE))
+				port->icount.overrun++;
+			
+			if ((status & ASC_STATUS_BE)) {
+				flag = TTY_BREAK;
+			} else if ((status & ASC_STATUS_PE)) {
+				flag = TTY_PARITY;
+			} else if ((status & ASC_STATUS_FE)) {
+				flag = TTY_FRAME;
+			}
 		}
 		
-		if ((lsr & ASC_CON_FE)) {
-			port->icount.frame++;
-			flag = TTY_FRAME;
-			status |= ASC_STATUS_FE;
-			asc_out(port, ASC_WHBCON, ASC_WHBCON_CLRFE);
-		}
+		status &= port->read_status_mask;
 		
-		if ((lsr & ASC_CON_OE)) {
-			port->icount.overrun++;
-			status |= ASC_STATUS_OE;
-			asc_out(port, ASC_WHBCON, ASC_WHBCON_CLROE);
-		}
+		if (uart_handle_sysrq_char(port, ch))
+			continue;
 		
-		if (((lsr & port->read_status_mask) & port->ignore_status_mask) == 0)
-			tty_insert_flip_char(tport, ch, flag);
-		
-		if ((status & ASC_STATUS_OE))
-			tty_insert_flip_char(tport, 0, TTY_OVERRUN);
+		uart_insert_char(port, status, ASC_STATUS_OE, ch, flag);
 	}
 	
+	/* Tell the rest of the system the news. New characters! */
 	tty_flip_buffer_push(tport);
 }
 
@@ -506,6 +544,8 @@ static void asc_set_termios(struct uart_port *port, struct ktermios *termios, co
 	port->read_status_mask = ASC_STATUS_OE;
 	if ((termios->c_iflag & INPCK))
 		port->read_status_mask |= ASC_STATUS_FE | ASC_STATUS_PE;
+	if ((termios->c_iflag & (IGNBRK | BRKINT | PARMRK)))
+		ascport->port.read_status_mask |= ASC_STATUS_BE;
 	
 	port->ignore_status_mask = 0;
 	
@@ -516,7 +556,7 @@ static void asc_set_termios(struct uart_port *port, struct ktermios *termios, co
 		// If we're ignoring parity and break indicators, ignore overruns too (for real raw support).
 		port->ignore_status_mask |= ASC_STATUS_BE;
 		
-		if (termios->c_iflag & IGNPAR)
+		if ((termios->c_iflag & IGNPAR))
 			port->ignore_status_mask |= ASC_STATUS_OE;
 	}
 	
@@ -546,8 +586,7 @@ static void asc_config_port(struct uart_port *port, int flags) {
 }
 
 static int asc_verify_port(struct uart_port *port, struct serial_struct *ser) {
-	/* No user changeable parameters */
-	return -EINVAL;
+	return port->type != PORT_ASC ? -1 : 0;
 }
 
 #ifdef CONFIG_CONSOLE_POLL
@@ -558,7 +597,7 @@ static int asc_get_poll_char(struct uart_port *port) {
 	return asc_in(port, ASC_RXB);
 }
 
-static void asc_put_poll_char(struct uart_port *port, unsigned char c) {
+static void asc_put_poll_char(struct uart_port *port, unsigned char ch) {
 	asc_out(port, ASC_TXB, ch);
 	while (!(asc_in(port, ASC_RIS) & ASC_RIS_TX));
 	asc_out(port, ASC_ICR, ASC_ICR_TX);
@@ -610,7 +649,8 @@ static int asc_init_port(struct asc_port *ascport, struct platform_device *pdev)
 	port->ops			= &asc_uart_ops;
 	port->fifosize		= ASC_FIFO_SIZE;
 	port->dev			= &pdev->dev;
-	port->has_sysrq		= true;
+	port->irq			= ascport->irq_rx;
+	port->has_sysrq		= IS_ENABLED(CONFIG_SERIAL_PMB887X_CONSOLE);
 	
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	port->membase = devm_ioremap_resource(&pdev->dev, res);
@@ -698,13 +738,26 @@ static int asc_serial_remove(struct platform_device *pdev) {
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int asc_serial_suspend(struct device *dev) {
+	struct uart_port *port = dev_get_drvdata(dev);
+	return uart_suspend_port(&asc_uart_driver, port);
+}
+
+static int asc_serial_resume(struct device *dev) {
+	struct uart_port *port = dev_get_drvdata(dev);
+	return uart_resume_port(&asc_uart_driver, port);
+}
+#endif /* CONFIG_PM_SLEEP */
+
+#ifdef CONFIG_SERIAL_PMB887X_CONSOLE
 static void asc_console_putchar(struct uart_port *port, unsigned char ch) {
-	while (asc_tx_fifo_is_full(port))
+	u32 timeout = 1000000;
+	while (timeout-- && asc_tx_fifo_is_full(port))
 		udelay(1);
 	asc_out(port, ASC_TXB, ch);
 }
 
-#ifdef CONFIG_SERIAL_PMB887X_CONSOLE
 static void asc_console_write(struct console *co, const char *s, unsigned count) {
 	struct uart_port *port = &asc_ports[co->index].port;
 	unsigned long flags;
@@ -806,8 +859,8 @@ static struct uart_driver asc_uart_driver = {
 	.owner			= THIS_MODULE,
 	.driver_name	= DRIVER_NAME,
 	.dev_name		= ASC_SERIAL_NAME,
-	.major			= 0,
-	.minor			= 0,
+	.major			= TTY_MAJOR,
+	.minor			= 64,
 	.nr				= ASC_MAX_PORTS,
 	.cons			= ASC_SERIAL_CONSOLE,
 };

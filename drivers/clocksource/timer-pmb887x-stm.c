@@ -51,7 +51,7 @@ static struct clocksource pmb887x_stm = {
 	.name	= "pmb887x-stm",
 	.rating	= 300,
 	.read	= pmb887x_stm_clocksource_read,
-	.mask	= CLOCKSOURCE_MASK(64),
+	.mask	= CLOCKSOURCE_MASK(56),
 	.flags	= CLOCK_SOURCE_IS_CONTINUOUS,
 };
 

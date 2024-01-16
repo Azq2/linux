@@ -69,6 +69,9 @@ static struct variant_data variant_arm = {
 	.start_err		= MCI_STARTBITERR,
 	.opendrain		= MCI_ROD,
 	.init			= mmci_variant_init,
+	// pmb887x
+	.dma_flow_controller	= true,
+	.dma_max_segs			= 1,
 };
 
 static struct variant_data variant_arm_extended_fifo = {
@@ -2397,7 +2400,7 @@ static int mmci_probe(struct amba_device *dev,
 	/*
 	 * We can do SGIO
 	 */
-	mmc->max_segs = NR_SG;
+	mmc->max_segs = variant->dma_max_segs ? variant->dma_max_segs : NR_SG;
 
 	/*
 	 * Since only a certain number of bits are valid in the data length

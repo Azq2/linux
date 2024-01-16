@@ -65,8 +65,8 @@ static struct pl08x_channel_data pmb887x_dma_info[] = {
 };
 
 static const struct dma_slave_map pmb887x_dma_slave_map[] = {
-	{ "pmb8876:mmc0", "tx", &pmb887x_dma_info[0] },
-	{ "pmb8876:mmc0", "rx", &pmb887x_dma_info[1] },
+	{ "pmb887x-mmc.0", "tx", &pmb887x_dma_info[0] },
+	{ "pmb887x-mmc.0", "rx", &pmb887x_dma_info[1] },
 };
 
 struct pl08x_platform_data pmb887x_pl080_plat_data = {
@@ -82,8 +82,8 @@ struct pl08x_platform_data pmb887x_pl080_plat_data = {
 
 /* Add auxdata to pass platform data */
 static struct of_dev_auxdata pmb887x_auxdata[] __initdata = {
-	OF_DEV_AUXDATA("arm,pl080", PMB887X_DMAC_BASE, NULL, &pmb887x_pl080_plat_data),
-	OF_DEV_AUXDATA("arm,primecell", PMB887X_MMCI_BASE, NULL, &pmb887x_pl180_plat_data),
+	OF_DEV_AUXDATA("arm,pl080", PMB887X_DMAC_BASE, "pmb887x-dma.0", &pmb887x_pl080_plat_data),
+	OF_DEV_AUXDATA("arm,primecell", PMB887X_MMCI_BASE, "pmb887x-mmc.0", &pmb887x_pl180_plat_data),
 	{}
 };
 

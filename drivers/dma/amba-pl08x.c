@@ -61,8 +61,6 @@
  *    will then move to the next LLI entry. Unsupported by PL080S.
  */
 
-#define DEBUG 1
-
 #include <linux/amba/bus.h>
 #include <linux/amba/pl08x.h>
 #include <linux/debugfs.h>

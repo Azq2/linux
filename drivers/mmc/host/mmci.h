@@ -382,6 +382,7 @@ struct variant_data {
 	u32			stm32_idmabsize_mask;
 	u32			stm32_idmabsize_align;
 	bool			dma_flow_controller;
+	u32				dma_max_segs;
 	void (*init)(struct mmci_host *host);
 };
 

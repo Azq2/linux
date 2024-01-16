@@ -67,12 +67,21 @@
 		
 		dmac: dma-controller@f3000000 {
 			compatible = "arm,pl080", "arm,primecell";
+			arm,primecell-periphid = <0x00041081>;
 			reg = <0xf3000000 0x1000>;
 			interrupt-parent = <&intc>;
 			interrupts = <0x23>, <0x24>, <0x25>, <0x26>, <0x27>, <0x28>, <0x29>, <0x2A>, <0x2B>;
 			clocks = <&fsys_clk>;
 			clock-names = "apb_pclk";
 			#dma-cells = <2>;
+			dma-channels = <8>;
+			dma-requests = <16>;
+			lli-bus-interface-ahb1;
+			lli-bus-interface-ahb2;
+			mem-bus-interface-ahb1;
+			mem-bus-interface-ahb2;
+			memcpy-burst-size = <256>;
+			memcpy-bus-width = <32>;
 		};
 		
 		gpio: gpio@f4300000 {

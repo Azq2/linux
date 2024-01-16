@@ -8,7 +8,7 @@ CONFIG_ARCH_PMB887X=y
 CONFIG_MACH_PMB887X=y
 CONFIG_AEABI=y
 # CONFIG_ATAGS is not set
-CONFIG_CMDLINE="earlycon=asc,0xf1000000 armmmci.fmax=900000 ignore_loglevel root=/dev/mmcblk0p1 debug rootdelay=5"
+CONFIG_CMDLINE="earlycon=asc,0xf1000000 armmmci.fmax=13000000 ignore_loglevel root=/dev/mmcblk0p1 ro rootdelay=5 init=/linuxrc"
 CONFIG_CMDLINE_FORCE=y
 CONFIG_VFP=y
 # CONFIG_SUSPEND is not set
@@ -65,8 +65,6 @@ CONFIG_LEDS_CLASS=y
 CONFIG_LEDS_GPIO=y
 CONFIG_LEDS_TRIGGERS=y
 CONFIG_DMADEVICES=y
-CONFIG_DMADEVICES_DEBUG=y
-CONFIG_DMADEVICES_VDEBUG=y
 CONFIG_AMBA_PL08X=y
 # CONFIG_VIRTIO_MENU is not set
 # CONFIG_VHOST_MENU is not set
